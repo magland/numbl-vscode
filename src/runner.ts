@@ -38,6 +38,7 @@ export class NumblRunner {
     const config = vscode.workspace.getConfiguration("numbl");
     const command = config.get<string>("command", "npx numbl");
     const extraPaths = config.get<string[]>("extraPaths", []);
+    const addScriptPath = config.get<boolean>("addScriptPath", true);
 
     const filePath = document.uri.fsPath;
     const cwd = path.dirname(filePath);
@@ -50,7 +51,7 @@ export class NumblRunner {
       "run",
       filePath,
       "--stream",
-      "--add-script-path",
+      ...(addScriptPath ? ["--add-script-path"] : []),
     ];
     for (const p of extraPaths) {
       args.push("--path", p);

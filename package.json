@@ -2,13 +2,23 @@
   "name": "numbl",
   "displayName": "Numbl",
   "description": "Run .m scripts with numbl — output and figures inside VS Code",
-  "version": "0.0.1",
-  "publisher": "magland",
+  "version": "0.0.2",
+  "publisher": "jmagland",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/magland/numbl-vscode"
   },
+  "bugs": {
+    "url": "https://github.com/magland/numbl-vscode/issues"
+  },
+  "keywords": [
+    "matlab",
+    "numbl",
+    "scientific computing",
+    "plotting",
+    "numerical"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -19,7 +29,7 @@
     "commands": [
       {
         "command": "numbl.run",
-        "title": "Run Script",
+        "title": "Run with Numbl",
         "icon": "$(play)",
         "category": "Numbl"
       },
@@ -58,6 +68,11 @@
           "type": "string",
           "default": "numbl",
           "description": "Command prefix for running numbl. Examples: 'numbl', 'npx numbl', 'npx tsx /path/to/src/cli.ts'"
+        },
+        "numbl.addScriptPath": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add the script's directory to the numbl workspace (passes --add-script-path)"
         },
         "numbl.extraPaths": {
           "type": "array",
