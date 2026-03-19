@@ -52,8 +52,8 @@
       "properties": {
         "numbl.command": {
           "type": "string",
-          "default": "npx numbl",
-          "description": "Command prefix for running numbl. Examples: 'npx numbl', 'numbl', 'npx tsx /path/to/src/cli.ts'"
+          "default": "numbl",
+          "description": "Command prefix for running numbl. Examples: 'numbl', 'npx numbl', 'npx tsx /path/to/src/cli.ts'"
         },
         "numbl.extraPaths": {
           "type": "array",
