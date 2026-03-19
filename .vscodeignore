@@ -2,6 +2,8 @@ src/**
 webview/**
 node_modules/**
 .vscode/**
+.gitignore
 tsconfig.json
-webview/tsconfig.json
+package-lock.json
 **/*.map
+**/*.ts
