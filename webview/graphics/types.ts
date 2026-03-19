@@ -1,7 +1,15 @@
 /**
- * Plot type definitions extracted from numbl's runtime.
- * These are the data types passed via the --stream NDJSON protocol.
+ * Shared graphics types used by both numbl-core and the rendering layer.
+ *
+ * This file is the single source of truth for plot trace interfaces and
+ * PlotInstruction.  numbl-core re-exports these types so that internal
+ * runtime code can import them without reaching into src/graphics/.
+ *
+ * The numbl-vscode extension syncs this file (and the rest of src/graphics/)
+ * via devel/sync-graphics.sh.
  */
+
+// ── PlotTrace type ──────────────────────────────────────────────────────
 
 export interface PlotTrace {
   x: number[];
@@ -15,6 +23,8 @@ export interface PlotTrace {
   markerFaceColor?: [number, number, number];
   markerIndices?: number[];
 }
+
+// ── Plot3Trace type ─────────────────────────────────────────────────────
 
 export interface Plot3Trace {
   x: number[];
@@ -30,12 +40,20 @@ export interface Plot3Trace {
   markerIndices?: number[];
 }
 
+// ── SurfTrace type ──────────────────────────────────────────────────────
+
 export interface SurfTrace {
+  /** X coordinates: flat array of length rows*cols (column-major) */
   x: number[];
+  /** Y coordinates: flat array of length rows*cols (column-major) */
   y: number[];
+  /** Z values: flat array of length rows*cols (column-major) */
   z: number[];
+  /** Number of rows in the grid */
   rows: number;
+  /** Number of columns in the grid */
   cols: number;
+  /** Optional color data (same shape as Z) */
   c?: number[];
   edgeColor?: [number, number, number] | "none" | "flat" | "interp";
   faceColor?:
@@ -47,23 +65,37 @@ export interface SurfTrace {
   faceAlpha?: number;
 }
 
+// ── ImagescTrace type ────────────────────────────────────────────────────
+
 export interface ImagescTrace {
+  /** X limits [xmin, xmax] */
   x: [number, number];
+  /** Y limits [ymin, ymax] */
   y: [number, number];
+  /** Z data: flat array (column-major), rows × cols */
   z: number[];
   rows: number;
   cols: number;
 }
 
+// ── ContourTrace type ────────────────────────────────────────────────────
+
 export interface ContourTrace {
+  /** X coordinates: flat array (column-major) */
   x: number[];
+  /** Y coordinates: flat array (column-major) */
   y: number[];
+  /** Z values: flat array (column-major) */
   z: number[];
   rows: number;
   cols: number;
+  /** Number of contour levels */
   nLevels: number;
+  /** Whether this is a filled contour (contourf) */
   filled: boolean;
 }
+
+// ── Plot Instructions ───────────────────────────────────────────────────
 
 export type PlotInstruction =
   | { type: "set_figure_handle"; handle: number }

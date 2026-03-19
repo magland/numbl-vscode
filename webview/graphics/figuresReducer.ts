@@ -4,8 +4,8 @@ import type {
   SurfTrace,
   ImagescTrace,
   ContourTrace,
+  PlotInstruction,
 } from "./types.js";
-import type { PlotInstruction } from "./types.js";
 
 export type AxesState = {
   holdOn: boolean;
