@@ -1,0 +1,93 @@
+{
+  "name": "numbl",
+  "displayName": "Numbl",
+  "description": "Run MATLAB-compatible .m scripts with numbl — output and figures inside VSCode",
+  "version": "0.0.1",
+  "publisher": "magland",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:matlab"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "numbl.run",
+        "title": "Run Script",
+        "icon": "$(play)",
+        "category": "Numbl"
+      },
+      {
+        "command": "numbl.stop",
+        "title": "Stop Script",
+        "icon": "$(debug-stop)",
+        "category": "Numbl"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "numbl.run",
+          "when": "resourceExtname == .m && !numbl.running",
+          "group": "navigation"
+        },
+        {
+          "command": "numbl.stop",
+          "when": "resourceExtname == .m && numbl.running",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "numbl.run",
+        "key": "ctrl+shift+r",
+        "when": "resourceExtname == .m"
+      }
+    ],
+    "configuration": {
+      "title": "Numbl",
+      "properties": {
+        "numbl.command": {
+          "type": "string",
+          "default": "npx numbl",
+          "description": "Command prefix for running numbl. Examples: 'npx numbl', 'numbl', 'npx tsx /path/to/src/cli.ts'"
+        },
+        "numbl.extraPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional workspace directories passed to numbl via --path"
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "matlab",
+        "aliases": ["MATLAB", "matlab"],
+        "extensions": [".m"]
+      }
+    ]
+  },
+  "scripts": {
+    "build": "npm run build:extension && npm run build:webview",
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --outfile=dist/extension.js --external:vscode",
+    "build:webview": "vite build --config webview/vite.config.ts",
+    "watch": "esbuild src/extension.ts --bundle --platform=node --format=cjs --outfile=dist/extension.js --external:vscode --watch"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.0",
+    "vite": "^7.0.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.9.0",
+    "three": "^0.175.0",
+    "@types/three": "^0.175.0"
+  }
+}
