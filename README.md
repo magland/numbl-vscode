@@ -1,6 +1,6 @@
 # Numbl for VS Code
 
-Run MATLAB-compatible `.m` scripts directly in VS Code using [numbl](https://github.com/flatironinstitute/numbl).
+Run `.m` scripts directly in VS Code using [numbl](https://github.com/flatironinstitute/numbl).
 
 ## Features
 

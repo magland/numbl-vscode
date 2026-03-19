@@ -1,7 +1,7 @@
 {
   "name": "numbl",
   "displayName": "Numbl",
-  "description": "Run MATLAB-compatible .m scripts with numbl — output and figures inside VSCode",
+  "description": "Run .m scripts with numbl — output and figures inside VS Code",
   "version": "0.0.1",
   "publisher": "magland",
   "license": "Apache-2.0",
