@@ -92,7 +92,8 @@ export class FigurePanel implements vscode.Disposable {
     content="default-src 'none';
              script-src ${webview.cspSource} 'unsafe-eval';
              style-src ${webview.cspSource} 'unsafe-inline';
-             img-src ${webview.cspSource} data: blob:;">
+             img-src ${webview.cspSource} data: blob:;
+             frame-src ${webview.cspSource} data:;">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="${styleUri}">
 </head>

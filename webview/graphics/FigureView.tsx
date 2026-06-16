@@ -1,8 +1,50 @@
-import { useRef, useEffect, useCallback } from "react";
+import { Component, useRef, useEffect, useCallback } from "react";
+import type { ErrorInfo, ReactNode } from "react";
 import type { PlotTrace } from "./types.js";
 import type { AxesState, FigureState } from "./figuresReducer.js";
 import { SurfView } from "./SurfView.js";
 import { drawPlot } from "./drawPlot.js";
+import { buildUihtmlSrcDoc } from "./uihtmlSrcDoc.js";
+
+class AxesErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Axes render error:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 8,
+            color: "#a00",
+            fontFamily: "sans-serif",
+            fontSize: 12,
+            textAlign: "center",
+            boxSizing: "border-box",
+          }}
+        >
+          Plot render error: {this.state.error.message}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface FigureViewProps {
   figure: FigureState;
@@ -10,6 +52,30 @@ interface FigureViewProps {
 
 export function FigureView({ figure }: FigureViewProps) {
   const { subplotGrid, sgtitle, axes } = figure;
+
+  // An HTML UI component (MATLAB `uihtml`) renders its self-contained HTML in
+  // an iframe, taking precedence over the axes/trace canvas. A srcdoc document
+  // needs no server; key by id to remount when HTMLSource/Data changes. The
+  // srcdoc embeds the `htmlComponent` data bridge (see buildUihtmlSrcDoc).
+  if (figure.uihtml) {
+    return (
+      <iframe
+        key={figure.uihtml.id}
+        title={`uihtml-${figure.uihtml.id}`}
+        srcDoc={buildUihtmlSrcDoc(
+          figure.uihtml.html,
+          figure.uihtml.data,
+          figure.uihtml.id
+        )}
+        style={{
+          width: "100%",
+          height: "100%",
+          border: "none",
+          display: "block",
+        }}
+      />
+    );
+  }
 
   const axesIndices = Object.keys(axes)
     .map(Number)
@@ -21,7 +87,11 @@ export function FigureView({ figure }: FigureViewProps) {
   if (!subplotGrid) {
     const ax = axes[axesIndices[0]];
     if (!ax) return null;
-    return <SingleAxesView axes={ax} />;
+    return (
+      <AxesErrorBoundary>
+        <SingleAxesView axes={ax} />
+      </AxesErrorBoundary>
+    );
   }
 
   // Subplot grid layout
@@ -77,7 +147,11 @@ export function FigureView({ figure }: FigureViewProps) {
                 overflow: "hidden",
               }}
             >
-              {ax ? <SingleAxesView axes={ax} /> : null}
+              {ax ? (
+                <AxesErrorBoundary>
+                  <SingleAxesView axes={ax} />
+                </AxesErrorBoundary>
+              ) : null}
             </div>
           );
         })}
@@ -89,14 +163,24 @@ export function FigureView({ figure }: FigureViewProps) {
 function SingleAxesView({ axes }: { axes: AxesState }) {
   const has3D =
     (axes.surfTraces && axes.surfTraces.length > 0) ||
-    (axes.plot3Traces && axes.plot3Traces.length > 0);
+    (axes.plot3Traces && axes.plot3Traces.length > 0) ||
+    (axes.bar3Traces && axes.bar3Traces.length > 0) ||
+    (axes.bar3hTraces && axes.bar3hTraces.length > 0) ||
+    (axes.quiver3Traces && axes.quiver3Traces.length > 0);
 
   if (has3D) {
     return (
       <SurfView
         surfTraces={axes.surfTraces ?? []}
         plot3Traces={axes.plot3Traces ?? []}
+        bar3Traces={axes.bar3Traces ?? []}
+        bar3hTraces={axes.bar3hTraces ?? []}
+        quiver3Traces={axes.quiver3Traces ?? []}
         shading={axes.shading}
+        colorbar={axes.colorbar}
+        colorbarLocation={axes.colorbarLocation}
+        colormap={axes.colormap}
+        axisVisible={axes.axisVisible}
       />
     );
   }
@@ -109,10 +193,32 @@ function SingleAxesView({ axes }: { axes: AxesState }) {
       ylabel={axes.ylabel}
       legend={axes.legend}
       gridOn={axes.gridOn}
+      boxOn={axes.boxOn}
       imagescTrace={axes.imagescTrace}
+      pcolorTraces={axes.pcolorTraces}
       contourTraces={axes.contourTraces}
       colormap={axes.colormap}
+      colormapData={axes.colormapData}
       axisMode={axes.axisMode}
+      axisScale={axes.axisScale}
+      barTraces={axes.barTraces}
+      barhTraces={axes.barhTraces}
+      errorBarTraces={axes.errorBarTraces}
+      boxTraces={axes.boxTraces}
+      pieTrace={axes.pieTrace}
+      heatmapTrace={axes.heatmapTrace}
+      quiverTraces={axes.quiverTraces}
+      areaTraces={axes.areaTraces}
+      areaBaseValue={axes.areaBaseValue}
+      patchTraces={axes.patchTraces}
+      shading={axes.shading}
+      colorbar={axes.colorbar}
+      colorbarLocation={axes.colorbarLocation}
+      caxis={axes.caxis}
+      xlim={axes.xlim}
+      ylim={axes.ylim}
+      yDir={axes.yDir}
+      axisVisible={axes.axisVisible}
     />
   );
 }
@@ -124,10 +230,32 @@ function PlotCanvas({
   ylabel,
   legend,
   gridOn,
+  boxOn,
   imagescTrace,
+  pcolorTraces,
   contourTraces,
   colormap,
+  colormapData,
   axisMode,
+  axisScale,
+  barTraces,
+  barhTraces,
+  errorBarTraces,
+  boxTraces,
+  pieTrace,
+  heatmapTrace,
+  quiverTraces,
+  areaTraces,
+  areaBaseValue,
+  patchTraces,
+  shading,
+  colorbar,
+  colorbarLocation,
+  caxis,
+  xlim,
+  ylim,
+  yDir,
+  axisVisible,
 }: {
   traces: PlotTrace[];
   title?: string;
@@ -135,10 +263,32 @@ function PlotCanvas({
   ylabel?: string;
   legend?: string[];
   gridOn?: boolean;
+  boxOn?: boolean;
   imagescTrace?: AxesState["imagescTrace"];
+  pcolorTraces?: AxesState["pcolorTraces"];
   contourTraces?: AxesState["contourTraces"];
   colormap?: string;
+  colormapData?: number[][];
   axisMode?: string;
+  axisScale?: AxesState["axisScale"];
+  barTraces?: AxesState["barTraces"];
+  barhTraces?: AxesState["barhTraces"];
+  errorBarTraces?: AxesState["errorBarTraces"];
+  boxTraces?: AxesState["boxTraces"];
+  pieTrace?: AxesState["pieTrace"];
+  heatmapTrace?: AxesState["heatmapTrace"];
+  quiverTraces?: AxesState["quiverTraces"];
+  areaTraces?: AxesState["areaTraces"];
+  areaBaseValue?: number;
+  patchTraces?: AxesState["patchTraces"];
+  shading?: AxesState["shading"];
+  colorbar?: boolean;
+  colorbarLocation?: string;
+  caxis?: [number, number];
+  xlim?: AxesState["xlim"];
+  ylim?: AxesState["ylim"];
+  yDir?: AxesState["yDir"];
+  axisVisible?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -157,7 +307,29 @@ function PlotCanvas({
       imagescTrace,
       contourTraces,
       colormap,
-      axisMode
+      axisMode,
+      axisScale,
+      barTraces,
+      barhTraces,
+      errorBarTraces,
+      boxTraces,
+      pieTrace,
+      heatmapTrace,
+      areaTraces,
+      areaBaseValue,
+      pcolorTraces,
+      shading,
+      colorbar,
+      colorbarLocation,
+      caxis,
+      colormapData,
+      quiverTraces,
+      xlim,
+      ylim,
+      yDir,
+      axisVisible,
+      boxOn,
+      patchTraces
     );
   }, [
     traces,
@@ -169,7 +341,29 @@ function PlotCanvas({
     imagescTrace,
     contourTraces,
     colormap,
+    colormapData,
     axisMode,
+    axisScale,
+    barTraces,
+    barhTraces,
+    errorBarTraces,
+    boxTraces,
+    pieTrace,
+    heatmapTrace,
+    areaTraces,
+    areaBaseValue,
+    pcolorTraces,
+    shading,
+    colorbar,
+    colorbarLocation,
+    caxis,
+    quiverTraces,
+    xlim,
+    ylim,
+    yDir,
+    axisVisible,
+    boxOn,
+    patchTraces,
   ]);
 
   useEffect(() => {

@@ -6,7 +6,7 @@ Run `.m` scripts directly in VS Code using [numbl](https://github.com/flatironin
 
 - **Run button** in the editor title bar for `.m` files
 - **Text output** displayed in the Numbl output channel
-- **Figures and plots** rendered in a webview panel (2D plots, 3D surfaces, imagesc, contour, etc.)
+- **Figures and plots** rendered in a webview panel — line/scatter, 3D surfaces & meshes, `imagesc`, `pcolor`, `contour`, bar/bar3, area, errorbar, quiver, pie, box, heatmap, patch, and `uihtml` components
 - **Error diagnostics** shown as inline squiggles with file and line info
 - **Keyboard shortcut**: `Ctrl+Shift+R` to run the current script
 
@@ -39,8 +39,9 @@ The extension will notify you when a newer version is available on npm.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `numbl.command` | `"numbl"` | Command prefix for running numbl. Examples: `"numbl"`, `"npx numbl"`, `"npx tsx /path/to/src/cli.ts"` |
-| `numbl.addScriptPath` | `true` | Add the script's directory to the numbl workspace |
 | `numbl.extraPaths` | `[]` | Additional workspace directories passed to numbl via `--path` |
+
+The script's own directory is added to the numbl workspace automatically.
 
 ## Usage
 

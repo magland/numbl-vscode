@@ -1,9 +1,19 @@
 import type {
   PlotTrace,
   Plot3Trace,
+  PatchTrace,
   SurfTrace,
   ImagescTrace,
+  PcolorTrace,
   ContourTrace,
+  BarTrace,
+  Bar3Trace,
+  ErrorBarTrace,
+  BoxTrace,
+  PieTrace,
+  HeatmapTrace,
+  QuiverTrace,
+  Quiver3Trace,
   PlotInstruction,
 } from "./types.js";
 
@@ -13,7 +23,21 @@ export type AxesState = {
   plot3Traces: Plot3Trace[];
   surfTraces: SurfTrace[];
   imagescTrace?: ImagescTrace;
+  pcolorTraces: PcolorTrace[];
   contourTraces: ContourTrace[];
+  barTraces: BarTrace[];
+  barhTraces: BarTrace[];
+  bar3Traces: Bar3Trace[];
+  bar3hTraces: Bar3Trace[];
+  errorBarTraces: ErrorBarTrace[];
+  boxTraces: BoxTrace[];
+  pieTrace?: PieTrace;
+  heatmapTrace?: HeatmapTrace;
+  quiverTraces: QuiverTrace[];
+  quiver3Traces: Quiver3Trace[];
+  areaTraces: PlotTrace[];
+  areaBaseValue: number;
+  patchTraces: PatchTrace[];
   title?: string;
   xlabel?: string;
   ylabel?: string;
@@ -21,10 +45,27 @@ export type AxesState = {
   shading?: "faceted" | "flat" | "interp";
   legend?: string[];
   gridOn?: boolean;
+  /** Axes border. Undefined/true → full rectangle (numbl's default, matching
+   *  MATLAB `box on`); false → only the left and bottom axis lines (`box off`). */
+  boxOn?: boolean;
   colorbar?: boolean;
+  colorbarLocation?: string;
   colormap?: string;
+  colormapData?: number[][];
   view?: { az: number; el: number };
   axisMode?: string;
+  axisScale?: "linear" | "semilogx" | "semilogy" | "loglog";
+  caxis?: [number, number];
+  /** Explicit axis limits from `axis([...])` / `xlim` / `ylim`. Each bound
+   *  may be `null`, meaning "use the data-derived bound" (partial limits). An
+   *  absent field means the whole axis is automatic. */
+  xlim?: [number | null, number | null];
+  ylim?: [number | null, number | null];
+  zlim?: [number | null, number | null];
+  /** y-axis direction: "reverse" is `axis ij` (origin at top-left). */
+  yDir?: "normal" | "reverse";
+  /** Axes lines/background visibility (`axis off` sets this false). */
+  axisVisible?: boolean;
 };
 
 export type FigureState = {
@@ -32,6 +73,11 @@ export type FigureState = {
   currentAxesIndex: number; // 1-based
   sgtitle?: string;
   axes: { [index: number]: AxesState };
+  /** When set, this figure is an HTML UI component (MATLAB `uihtml`): the
+   *  `html` string is rendered in an iframe instead of the axes/trace canvas.
+   *  Takes precedence over `axes`. `data` is the JSON-encoded `Data` property
+   *  (from `jsonencode`), pushed into the page's `htmlComponent`. */
+  uihtml?: { id: string; html: string; data?: string };
 };
 
 export type FiguresState = {
@@ -49,7 +95,19 @@ const defaultAxes: AxesState = {
   traces: [],
   plot3Traces: [],
   surfTraces: [],
+  pcolorTraces: [],
   contourTraces: [],
+  barTraces: [],
+  barhTraces: [],
+  bar3Traces: [],
+  bar3hTraces: [],
+  errorBarTraces: [],
+  boxTraces: [],
+  quiverTraces: [],
+  quiver3Traces: [],
+  areaTraces: [],
+  areaBaseValue: 0,
+  patchTraces: [],
 };
 
 function getAxes(fig: FigureState): AxesState {
@@ -99,7 +157,25 @@ function addTraces(
   update: Partial<
     Pick<
       AxesState,
-      "traces" | "plot3Traces" | "surfTraces" | "imagescTrace" | "contourTraces"
+      | "traces"
+      | "plot3Traces"
+      | "surfTraces"
+      | "imagescTrace"
+      | "pcolorTraces"
+      | "contourTraces"
+      | "barTraces"
+      | "barhTraces"
+      | "bar3Traces"
+      | "bar3hTraces"
+      | "errorBarTraces"
+      | "boxTraces"
+      | "pieTrace"
+      | "heatmapTrace"
+      | "quiverTraces"
+      | "quiver3Traces"
+      | "areaTraces"
+      | "areaBaseValue"
+      | "patchTraces"
     >
   >
 ): FiguresState {
@@ -115,7 +191,23 @@ function addTraces(
         traces: update.traces ?? (hold ? axes.traces : []),
         plot3Traces: update.plot3Traces ?? (hold ? axes.plot3Traces : []),
         surfTraces: update.surfTraces ?? (hold ? axes.surfTraces : []),
+        pcolorTraces: update.pcolorTraces ?? (hold ? axes.pcolorTraces : []),
         contourTraces: update.contourTraces ?? (hold ? axes.contourTraces : []),
+        barTraces: update.barTraces ?? (hold ? axes.barTraces : []),
+        barhTraces: update.barhTraces ?? (hold ? axes.barhTraces : []),
+        bar3Traces: update.bar3Traces ?? (hold ? axes.bar3Traces : []),
+        bar3hTraces: update.bar3hTraces ?? (hold ? axes.bar3hTraces : []),
+        errorBarTraces:
+          update.errorBarTraces ?? (hold ? axes.errorBarTraces : []),
+        boxTraces: update.boxTraces ?? (hold ? axes.boxTraces : []),
+        pieTrace: update.pieTrace ?? (hold ? axes.pieTrace : undefined),
+        heatmapTrace:
+          update.heatmapTrace ?? (hold ? axes.heatmapTrace : undefined),
+        quiverTraces: update.quiverTraces ?? (hold ? axes.quiverTraces : []),
+        quiver3Traces: update.quiver3Traces ?? (hold ? axes.quiver3Traces : []),
+        areaTraces: update.areaTraces ?? (hold ? axes.areaTraces : []),
+        areaBaseValue: update.areaBaseValue ?? axes.areaBaseValue,
+        patchTraces: update.patchTraces ?? (hold ? axes.patchTraces : []),
         ...(update.imagescTrace !== undefined
           ? { imagescTrace: update.imagescTrace }
           : {}),
@@ -131,6 +223,22 @@ export const figuresReducer = (
   switch (action.type) {
     case "set_figure_handle":
       return { ...state, currentHandle: action.handle };
+
+    case "uihtml": {
+      // An HTML UI component sets the current figure's content to rendered
+      // HTML (shown as an iframe by FigureView).
+      const fig = ensureFig(state);
+      return {
+        ...state,
+        figs: {
+          ...state.figs,
+          [state.currentHandle]: {
+            ...fig,
+            uihtml: { id: action.id, html: action.html, data: action.data },
+          },
+        },
+      };
+    }
 
     case "set_hold":
       return updateAxes(state, { holdOn: action.value });
@@ -153,6 +261,59 @@ export const figuresReducer = (
       });
     }
 
+    case "line": {
+      // Unlike `plot`, the primitive `line` does not call newplot and
+      // ignores hold/NextPlot: it always adds the line(s) to the current
+      // axes without deleting other graphics objects or resetting props.
+      const axes = getAxes(ensureFig(state));
+      return updateAxes(state, {
+        traces: [...axes.traces, ...action.traces],
+      });
+    }
+
+    case "line3": {
+      // 3-D primitive line — same always-add semantics as `line`.
+      const axes = getAxes(ensureFig(state));
+      return updateAxes(state, {
+        plot3Traces: [...axes.plot3Traces, ...action.traces],
+      });
+    }
+
+    case "patch": {
+      // patch adds polygons to the current axes without clearing other objects
+      // or respecting hold (it does not call newplot).
+      const axes = getAxes(ensureFig(state));
+      return updateAxes(state, {
+        patchTraces: [...axes.patchTraces, action.trace],
+      });
+    }
+
+    case "update_trace": {
+      // Live-update a previously-created trace identified by `id` (from a
+      // graphics handle, e.g. `set(h,'XData',...)`). Because plot batches are
+      // serialized to the viewer, mutating the handle's trace can't reach an
+      // already-flushed instruction — the change is re-emitted as this action
+      // and applied to the renderer's accumulated state here. New objects are
+      // returned so React re-renders.
+      const axes = getAxes(ensureFig(state));
+      const patch = <T extends { id?: number }>(arr: T[]): T[] => {
+        let changed = false;
+        const next = arr.map(t => {
+          if (t.id === action.id) {
+            changed = true;
+            return { ...t, ...action.props } as T;
+          }
+          return t;
+        });
+        return changed ? next : arr;
+      };
+      return updateAxes(state, {
+        traces: patch(axes.traces),
+        plot3Traces: patch(axes.plot3Traces),
+        patchTraces: patch(axes.patchTraces),
+      });
+    }
+
     case "surf": {
       const axes = getAxes(ensureFig(state));
       return addTraces(state, {
@@ -162,8 +323,27 @@ export const figuresReducer = (
       });
     }
 
+    case "surface": {
+      // Unlike `surf`, the primitive `surface` does not call newplot and
+      // ignores hold/NextPlot: it always adds the surface to the current
+      // axes without deleting other graphics objects or resetting props.
+      const axes = getAxes(ensureFig(state));
+      return updateAxes(state, {
+        surfTraces: [...axes.surfTraces, action.trace],
+      });
+    }
+
     case "imagesc":
       return addTraces(state, { imagescTrace: action.trace });
+
+    case "pcolor": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        pcolorTraces: axes.holdOn
+          ? [...axes.pcolorTraces, action.trace]
+          : [action.trace],
+      });
+    }
 
     case "contour": {
       const axes = getAxes(ensureFig(state));
@@ -180,6 +360,94 @@ export const figuresReducer = (
         surfTraces: axes.holdOn
           ? [...axes.surfTraces, action.trace]
           : [action.trace],
+      });
+    }
+
+    case "bar": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        barTraces: axes.holdOn
+          ? [...axes.barTraces, ...action.traces]
+          : [...action.traces],
+      });
+    }
+
+    case "barh": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        barhTraces: axes.holdOn
+          ? [...axes.barhTraces, ...action.traces]
+          : [...action.traces],
+      });
+    }
+
+    case "bar3": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        bar3Traces: axes.holdOn
+          ? [...axes.bar3Traces, action.trace]
+          : [action.trace],
+      });
+    }
+
+    case "bar3h": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        bar3hTraces: axes.holdOn
+          ? [...axes.bar3hTraces, action.trace]
+          : [action.trace],
+      });
+    }
+
+    case "errorbar": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        errorBarTraces: axes.holdOn
+          ? [...axes.errorBarTraces, ...action.traces]
+          : [...action.traces],
+      });
+    }
+
+    case "boxchart": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        boxTraces: axes.holdOn
+          ? [...axes.boxTraces, ...action.traces]
+          : [...action.traces],
+      });
+    }
+
+    case "piechart":
+      return addTraces(state, { pieTrace: action.trace });
+
+    case "heatmap":
+      return addTraces(state, { heatmapTrace: action.trace });
+
+    case "quiver": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        quiverTraces: axes.holdOn
+          ? [...axes.quiverTraces, ...action.traces]
+          : [...action.traces],
+      });
+    }
+
+    case "quiver3": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        quiver3Traces: axes.holdOn
+          ? [...axes.quiver3Traces, action.trace]
+          : [action.trace],
+      });
+    }
+
+    case "area": {
+      const axes = getAxes(ensureFig(state));
+      return addTraces(state, {
+        areaTraces: axes.holdOn
+          ? [...axes.areaTraces, ...action.traces]
+          : [...action.traces],
+        areaBaseValue: action.baseValue,
       });
     }
 
@@ -227,14 +495,46 @@ export const figuresReducer = (
     }
     case "set_grid":
       return updateAxes(state, { gridOn: action.value });
+    case "set_box":
+      return updateAxes(state, { boxOn: action.value });
     case "set_colorbar":
-      return updateAxes(state, { colorbar: action.value !== "off" });
+      return updateAxes(state, {
+        colorbar: action.value !== "off",
+        colorbarLocation: action.location ?? "eastoutside",
+      });
     case "set_colormap":
-      return updateAxes(state, { colormap: action.name });
+      return updateAxes(state, {
+        colormap: action.name,
+        colormapData: action.data,
+      });
     case "set_view":
       return updateAxes(state, { view: { az: action.az, el: action.el } });
     case "set_axis":
       return updateAxes(state, { axisMode: action.value });
+    case "set_axis_limits": {
+      const axes = getAxes(ensureFig(state));
+      const resolve = (
+        prev: [number | null, number | null] | undefined,
+        spec: typeof action.xlim
+      ): [number | null, number | null] | undefined => {
+        if (spec === undefined) return prev; // leave unchanged
+        if (spec === "auto") return undefined; // back to data-fit
+        return spec;
+      };
+      return updateAxes(state, {
+        xlim: resolve(axes.xlim, action.xlim),
+        ylim: resolve(axes.ylim, action.ylim),
+        zlim: resolve(axes.zlim, action.zlim),
+      });
+    }
+    case "set_axis_ydir":
+      return updateAxes(state, { yDir: action.dir });
+    case "set_axis_visible":
+      return updateAxes(state, { axisVisible: action.value });
+    case "set_axis_scale":
+      return updateAxes(state, { axisScale: action.value });
+    case "set_caxis":
+      return updateAxes(state, { caxis: action.limits });
 
     case "clf": {
       const fig = state.figs[state.currentHandle];
@@ -244,6 +544,49 @@ export const figuresReducer = (
         figs: {
           ...state.figs,
           [state.currentHandle]: { ...defaultFigure },
+        },
+      };
+    }
+
+    case "cla": {
+      // Clear the current axes (creating the figure/axes if needed).
+      //   reset=false → delete the plotted graphics objects (the data
+      //     traces, which have visible handles) but keep the title, axis
+      //     labels, and appearance properties — these have hidden handles
+      //     in MATLAB and survive a plain `cla`.
+      //   reset=true  → reset the axes entirely to its default state.
+      const fig = ensureFig(state);
+      const prev = getAxes(fig);
+      const cleared: AxesState = action.reset
+        ? { ...defaultAxes }
+        : {
+            ...defaultAxes,
+            title: prev.title,
+            xlabel: prev.xlabel,
+            ylabel: prev.ylabel,
+            zlabel: prev.zlabel,
+            gridOn: prev.gridOn,
+            boxOn: prev.boxOn,
+            colorbar: prev.colorbar,
+            colorbarLocation: prev.colorbarLocation,
+            colormap: prev.colormap,
+            colormapData: prev.colormapData,
+            view: prev.view,
+            axisMode: prev.axisMode,
+            axisScale: prev.axisScale,
+            caxis: prev.caxis,
+            xlim: prev.xlim,
+            ylim: prev.ylim,
+            zlim: prev.zlim,
+            yDir: prev.yDir,
+            axisVisible: prev.axisVisible,
+            shading: prev.shading,
+          };
+      return {
+        ...state,
+        figs: {
+          ...state.figs,
+          [state.currentHandle]: setAxes(fig, cleared),
         },
       };
     }

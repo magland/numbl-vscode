@@ -1,10 +1,15 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, type CSSProperties } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
-import type { SurfTrace, Plot3Trace } from "./types.js";
+import type {
+  SurfTrace,
+  Plot3Trace,
+  Bar3Trace,
+  Quiver3Trace,
+} from "./types.js";
 import { colormapLookup } from "./surfColormap.js";
 
 // Color order for plot3 traces
@@ -21,13 +26,28 @@ const TRACE_COLORS = [
 interface SurfViewProps {
   surfTraces: SurfTrace[];
   plot3Traces?: Plot3Trace[];
+  bar3Traces?: Bar3Trace[];
+  bar3hTraces?: Bar3Trace[];
+  quiver3Traces?: Quiver3Trace[];
   shading?: "faceted" | "flat" | "interp";
+  colorbar?: boolean;
+  colorbarLocation?: string;
+  colormap?: string;
+  /** `axis off` hides the axes box/lines (the plotted surfaces remain). */
+  axisVisible?: boolean;
 }
 
 export function SurfView({
   surfTraces,
   plot3Traces = [],
+  bar3Traces = [],
+  bar3hTraces = [],
+  quiver3Traces = [],
   shading,
+  colorbar,
+  colorbarLocation,
+  colormap,
+  axisVisible,
 }: SurfViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<{
@@ -120,7 +140,14 @@ export function SurfView({
       if ((obj as THREE.Mesh).geometry) (obj as THREE.Mesh).geometry.dispose();
     }
 
-    if (surfTraces.length === 0 && plot3Traces.length === 0) return;
+    if (
+      surfTraces.length === 0 &&
+      plot3Traces.length === 0 &&
+      bar3Traces.length === 0 &&
+      bar3hTraces.length === 0 &&
+      quiver3Traces.length === 0
+    )
+      return;
 
     // Compute global data ranges across both surf and plot3 traces
     let xMin = Infinity,
@@ -160,6 +187,42 @@ export function SurfView({
       updateRange(trace.y, yMinRef, yMaxRef);
       updateRange(trace.z, zMinRef, zMaxRef);
     }
+    for (const trace of bar3Traces) {
+      updateRange(trace.x, xMinRef, xMaxRef);
+      updateRange(trace.y, yMinRef, yMaxRef);
+      updateRange(trace.z, zMinRef, zMaxRef);
+      // Bars extend to zero on z-axis
+      if (0 < zMinRef.v) zMinRef.v = 0;
+    }
+    for (const trace of bar3hTraces) {
+      // bar3h: bars extend along x-axis, positions on y and z axes
+      updateRange(trace.y, yMinRef, yMaxRef);
+      updateRange(trace.z, zMinRef, zMaxRef);
+      updateRange(trace.x, xMinRef, xMaxRef);
+      // Bars extend to zero on x-axis
+      if (0 < xMinRef.v) xMinRef.v = 0;
+    }
+    for (const trace of quiver3Traces) {
+      // Include both the arrow tails and the arrow heads.
+      updateRange(trace.x, xMinRef, xMaxRef);
+      updateRange(trace.y, yMinRef, yMaxRef);
+      updateRange(trace.z, zMinRef, zMaxRef);
+      updateRange(
+        trace.x.map((v, i) => v + (trace.u[i] ?? 0)),
+        xMinRef,
+        xMaxRef
+      );
+      updateRange(
+        trace.y.map((v, i) => v + (trace.v[i] ?? 0)),
+        yMinRef,
+        yMaxRef
+      );
+      updateRange(
+        trace.z.map((v, i) => v + (trace.w[i] ?? 0)),
+        zMinRef,
+        zMaxRef
+      );
+    }
 
     xMin = xMinRef.v;
     xMax = xMaxRef.v;
@@ -182,18 +245,54 @@ export function SurfView({
       zMax += 1;
     }
 
-    const rangeMax = Math.max(xMax - xMin, yMax - yMin, zMax - zMin);
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    const zRange2 = zMax - zMin || 1;
+    const rangeMax = Math.max(xRange, yRange, zRange2);
     const cxData = (xMin + xMax) / 2;
     const cyData = (yMin + yMax) / 2;
     const czData = (zMin + zMax) / 2;
 
+    // For bar3/bar3h: use per-axis scaling when z range dominates x/y range.
+    // This prevents bars from appearing as thin sticks in histogram2-style data.
+    const hasOnlyBars =
+      surfTraces.length === 0 &&
+      plot3Traces.length === 0 &&
+      (bar3Traces.length > 0 || bar3hTraces.length > 0);
+    const barRangeMax = hasOnlyBars ? Math.max(xRange, yRange) : rangeMax;
+    // normBar scales x/y to fill the view; normZ still uses rangeMax for z
+    const normBar = (v: number, center: number) => (v - center) / barRangeMax;
+    const normBarZ = (v: number, center: number) =>
+      (v - center) / (hasOnlyBars ? Math.max(barRangeMax, zRange2) : rangeMax);
+
     // Normalize a data point to [-0.5, 0.5] range
     const norm = (v: number, center: number) => (v - center) / rangeMax;
+
+    // Color range (caxis) for surf vertex colors: the explicit color data C
+    // when present (surf(x,y,z,C)), otherwise the height Z, taken globally
+    // across all surf traces. This is independent of the geometry's z extent
+    // — using the z extent washes out a surface whose C range is much smaller
+    // (e.g. a solution plotted on a curved surface), and would disagree with
+    // the colorbar (which already uses the C range).
+    let cMin = Infinity;
+    let cMax = -Infinity;
+    for (const trace of surfTraces) {
+      for (const v of trace.c ?? trace.z) {
+        if (isFinite(v)) {
+          if (v < cMin) cMin = v;
+          if (v > cMax) cMax = v;
+        }
+      }
+    }
+    if (!isFinite(cMin)) {
+      cMin = zMin;
+      cMax = zMax;
+    }
+    const cRange = cMax - cMin || 1;
 
     // ── Render surf traces ──────────────────────────────────────────────
     for (const trace of surfTraces) {
       const { rows, cols, x, y, z } = trace;
-      const zRange = zMax - zMin || 1;
       const alpha = trace.faceAlpha ?? 1;
 
       // Build indexed geometry
@@ -215,9 +314,8 @@ export function SurfView({
           positions[vi * 3 + 1] = nz;
           positions[vi * 3 + 2] = ny;
 
-          const t = trace.c
-            ? (trace.c[idx] - zMin) / zRange
-            : (z[idx] - zMin) / zRange;
+          const cval = trace.c ? trace.c[idx] : z[idx];
+          const t = (cval - cMin) / cRange;
           const [r, g, b] = colormapLookup(t);
           colors[vi * 3] = r;
           colors[vi * 3 + 1] = g;
@@ -461,23 +559,521 @@ export function SurfView({
       }
     }
 
-    // Axis lines
-    addAxisLines(
-      scene,
-      xMin,
-      xMax,
-      yMin,
-      yMax,
-      zMin,
-      zMax,
-      rangeMax,
-      cxData,
-      cyData,
-      czData
-    );
-  }, [surfTraces, plot3Traces, shading]);
+    // ── Render quiver3 traces (3-D arrows) ───────────────────────────────
+    for (const trace of quiver3Traces) {
+      const { x, y, z, u, v, w } = trace;
+      const color = trace.color ?? [0, 0.447, 0.741];
+      const threeColor = new THREE.Color(color[0], color[1], color[2]);
+      const lw = trace.lineWidth ?? 0.5;
+      // data (x,y,z) → three (X, Z, Y), matching the surf/plot3 mapping.
+      const toThree = (dx: number, dy: number, dz: number) =>
+        new THREE.Vector3(norm(dx, cxData), norm(dz, czData), norm(dy, cyData));
+      const up = new THREE.Vector3(0, 1, 0);
+      const segs: number[] = []; // pairs of endpoints for LineSegments
 
-  return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
+      for (let i = 0; i < x.length; i++) {
+        if (
+          !isFinite(x[i]) ||
+          !isFinite(y[i]) ||
+          !isFinite(z[i]) ||
+          !isFinite(u[i]) ||
+          !isFinite(v[i]) ||
+          !isFinite(w[i])
+        )
+          continue;
+        const tail = toThree(x[i], y[i], z[i]);
+        const head = toThree(x[i] + u[i], y[i] + v[i], z[i] + w[i]);
+        // Shaft
+        segs.push(tail.x, tail.y, tail.z, head.x, head.y, head.z);
+
+        if (trace.showArrowHead) {
+          const dir = new THREE.Vector3().subVectors(head, tail);
+          const len = dir.length();
+          if (len > 1e-9) {
+            dir.multiplyScalar(1 / len);
+            let perp = new THREE.Vector3().crossVectors(dir, up);
+            if (perp.lengthSq() < 1e-12)
+              perp = new THREE.Vector3().crossVectors(
+                dir,
+                new THREE.Vector3(1, 0, 0)
+              );
+            perp.normalize();
+            const barb = Math.min(0.3 * len, len);
+            const back = dir.clone().multiplyScalar(-1);
+            const cosA = Math.cos((20 * Math.PI) / 180);
+            const sinA = Math.sin((20 * Math.PI) / 180);
+            const b1 = head
+              .clone()
+              .addScaledVector(back, barb * cosA)
+              .addScaledVector(perp, barb * sinA);
+            const b2 = head
+              .clone()
+              .addScaledVector(back, barb * cosA)
+              .addScaledVector(perp, -barb * sinA);
+            segs.push(head.x, head.y, head.z, b1.x, b1.y, b1.z);
+            segs.push(head.x, head.y, head.z, b2.x, b2.y, b2.z);
+          }
+        }
+      }
+
+      if (segs.length > 0) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(segs, 3));
+        const mat = new THREE.LineBasicMaterial({
+          color: threeColor,
+          linewidth: lw,
+        });
+        scene.add(new THREE.LineSegments(geo, mat));
+      }
+
+      // Markers at the arrow bases (LineSpec marker or 'filled').
+      if (trace.marker && trace.marker !== "none") {
+        const markerSize = 6 / 600;
+        const markerGeo = new THREE.SphereGeometry(markerSize, 8, 8);
+        const markerMat = new THREE.MeshBasicMaterial({ color: threeColor });
+        for (let i = 0; i < x.length; i++) {
+          if (!isFinite(x[i]) || !isFinite(y[i]) || !isFinite(z[i])) continue;
+          const p = toThree(x[i], y[i], z[i]);
+          const mesh = new THREE.Mesh(markerGeo, markerMat);
+          mesh.position.set(p.x, p.y, p.z);
+          scene.add(mesh);
+        }
+      }
+    }
+
+    // ── Render bar3 traces (vertical 3D bars) ────────────────────────────
+    for (const trace of bar3Traces) {
+      const halfW = (trace.width / 2) * 0.9; // slight shrink to show gaps
+      const zRangeT = zMax - zMin || 1;
+      for (let i = 0; i < trace.x.length; i++) {
+        const bx = trace.x[i];
+        const by = trace.y[i];
+        const bz = trace.z[i];
+        if (!isFinite(bz)) continue;
+
+        const barHeight = Math.abs(normBarZ(bz, czData) - normBarZ(0, czData));
+        const barCenter = (normBarZ(bz, czData) + normBarZ(0, czData)) / 2;
+
+        const geo = new THREE.BoxGeometry(
+          (halfW * 2) / barRangeMax,
+          barHeight,
+          (halfW * 2) / barRangeMax
+        );
+
+        const t = (bz - zMin) / zRangeT;
+        const [cr, cg, cb] = trace.color ?? colormapLookup(t);
+        const mat = new THREE.MeshPhongMaterial({
+          color: new THREE.Color(cr, cg, cb),
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        // data X→three X, data Z→three Y, data Y→three Z
+        mesh.position.set(normBar(bx, cxData), barCenter, normBar(by, cyData));
+        scene.add(mesh);
+
+        // Edge wireframe
+        const edges = new THREE.EdgesGeometry(geo);
+        const lineMat = new THREE.LineBasicMaterial({
+          color: 0x000000,
+          opacity: 0.3,
+          transparent: true,
+        });
+        const wireframe = new THREE.LineSegments(edges, lineMat);
+        wireframe.position.copy(mesh.position);
+        scene.add(wireframe);
+      }
+    }
+
+    // ── Render bar3h traces (horizontal 3D bars) ───────────────────────
+    for (const trace of bar3hTraces) {
+      const halfW = (trace.width / 2) * 0.9;
+      const xRangeH = xMax - xMin || 1;
+      // bar3h: x=positions (category axis, mapped to z-axis in MATLAB),
+      //        y=bar lengths (value axis, mapped to y/horizontal),
+      //        z values are the bar lengths, x values are positions
+      // Reinterpret: y-positions on z-axis, x-values are bar lengths on x-axis
+      for (let i = 0; i < trace.x.length; i++) {
+        const pos = trace.y[i]; // position on y-axis
+        const colIdx = trace.x[i]; // position on x-axis (column)
+        const len = trace.z[i]; // bar length along x-axis
+        if (!isFinite(len)) continue;
+
+        const barLength = Math.abs(normBar(len, cxData) - normBar(0, cxData));
+        const barCenter = (normBar(len, cxData) + normBar(0, cxData)) / 2;
+
+        const geo = new THREE.BoxGeometry(
+          barLength,
+          (halfW * 2) / barRangeMax,
+          (halfW * 2) / barRangeMax
+        );
+
+        const t = (len - xMin) / xRangeH;
+        const [cr, cg, cb] = trace.color ?? colormapLookup(t);
+        const mat = new THREE.MeshPhongMaterial({
+          color: new THREE.Color(cr, cg, cb),
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(
+          barCenter,
+          normBar(colIdx, czData),
+          normBar(pos, cyData)
+        );
+        scene.add(mesh);
+
+        const edges = new THREE.EdgesGeometry(geo);
+        const lineMat = new THREE.LineBasicMaterial({
+          color: 0x000000,
+          opacity: 0.3,
+          transparent: true,
+        });
+        const wireframe = new THREE.LineSegments(edges, lineMat);
+        wireframe.position.copy(mesh.position);
+        scene.add(wireframe);
+      }
+    }
+
+    // Axis lines (hidden by `axis off`)
+    if (axisVisible !== false) {
+      addAxisLines(
+        scene,
+        xMin,
+        xMax,
+        yMin,
+        yMax,
+        zMin,
+        zMax,
+        rangeMax,
+        cxData,
+        cyData,
+        czData
+      );
+    }
+  }, [
+    surfTraces,
+    plot3Traces,
+    bar3Traces,
+    bar3hTraces,
+    quiver3Traces,
+    shading,
+    axisVisible,
+  ]);
+
+  // Compute color range for the colorbar from surf traces (uses C if present,
+  // otherwise Z). Falls back to bar3 z values when no surf traces are present.
+  let cbMin = Infinity;
+  let cbMax = -Infinity;
+  for (const t of surfTraces) {
+    const arr = t.c ?? t.z;
+    for (const v of arr) {
+      if (isFinite(v)) {
+        if (v < cbMin) cbMin = v;
+        if (v > cbMax) cbMax = v;
+      }
+    }
+  }
+  if (!isFinite(cbMin)) {
+    for (const t of bar3Traces) {
+      for (const v of t.z) {
+        if (isFinite(v)) {
+          if (v < cbMin) cbMin = v;
+          if (v > cbMax) cbMax = v;
+        }
+      }
+    }
+  }
+  const haveColorRange = isFinite(cbMin) && isFinite(cbMax);
+  if (cbMin === cbMax) {
+    cbMin -= 0.5;
+    cbMax += 0.5;
+  }
+
+  return (
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
+      {colorbar && haveColorRange && (
+        <ColorbarOverlay
+          location={(colorbarLocation ?? "eastoutside").toLowerCase()}
+          dMin={cbMin}
+          dMax={cbMax}
+          colormap={colormap}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Colorbar overlay (HTML, drawn on top of the Three.js canvas) ────────
+
+function ColorbarOverlay({
+  location,
+  dMin,
+  dMax,
+  colormap,
+}: {
+  location: string;
+  dMin: number;
+  dMax: number;
+  colormap?: string;
+}) {
+  // Build a CSS gradient from N samples of the colormap.
+  // (colormap name is currently unused — surfColormap.colormapLookup uses parula.)
+  void colormap;
+  const N = 32;
+  const stops: string[] = [];
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1);
+    const [r, g, b] = colormapLookup(t);
+    const rgb = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    stops.push(`${rgb} ${(t * 100).toFixed(2)}%`);
+  }
+  const horizontal =
+    location === "northoutside" ||
+    location === "southoutside" ||
+    location === "north" ||
+    location === "south";
+  // Vertical gradients go bottom→top so the max sits at the top.
+  const gradient = horizontal
+    ? `linear-gradient(to right, ${stops.join(",")})`
+    : `linear-gradient(to top, ${stops.join(",")})`;
+
+  const fmt = (v: number) =>
+    Number.isInteger(v) ? String(v) : v.toPrecision(3);
+
+  // Position styles per location
+  const barThickness = 16;
+  const containerStyle: CSSProperties = {
+    position: "absolute",
+    pointerEvents: "none",
+    fontFamily: "sans-serif",
+    fontSize: 10,
+    color: "#333",
+  };
+
+  const barStyle: CSSProperties = {
+    background: gradient,
+    border: "1px solid #999",
+    boxSizing: "border-box",
+  };
+
+  switch (location) {
+    case "eastoutside":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            top: 12,
+            bottom: 12,
+            right: 8,
+            width: 50,
+            display: "flex",
+            alignItems: "stretch",
+          }}
+        >
+          <div style={{ ...barStyle, width: barThickness, height: "100%" }} />
+          <div
+            style={{
+              marginLeft: 4,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
+            }}
+          >
+            <span>{fmt(dMax)}</span>
+            <span>{fmt(dMin)}</span>
+          </div>
+        </div>
+      );
+    case "westoutside":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            top: 12,
+            bottom: 12,
+            left: 8,
+            width: 50,
+            display: "flex",
+            alignItems: "stretch",
+            flexDirection: "row-reverse",
+          }}
+        >
+          <div style={{ ...barStyle, width: barThickness, height: "100%" }} />
+          <div
+            style={{
+              marginRight: 4,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
+              textAlign: "right",
+            }}
+          >
+            <span>{fmt(dMax)}</span>
+            <span>{fmt(dMin)}</span>
+          </div>
+        </div>
+      );
+    case "northoutside":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            left: 12,
+            right: 12,
+            top: 8,
+            height: 32,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 2,
+            }}
+          >
+            <span>{fmt(dMin)}</span>
+            <span>{fmt(dMax)}</span>
+          </div>
+          <div style={{ ...barStyle, height: barThickness, width: "100%" }} />
+        </div>
+      );
+    case "southoutside":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            left: 12,
+            right: 12,
+            bottom: 8,
+            height: 32,
+            display: "flex",
+            flexDirection: "column-reverse",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 2,
+            }}
+          >
+            <span>{fmt(dMin)}</span>
+            <span>{fmt(dMax)}</span>
+          </div>
+          <div style={{ ...barStyle, height: barThickness, width: "100%" }} />
+        </div>
+      );
+    case "east":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            top: 24,
+            bottom: 24,
+            right: 24,
+            width: 50,
+            display: "flex",
+            flexDirection: "row-reverse",
+            alignItems: "stretch",
+          }}
+        >
+          <div style={{ ...barStyle, width: barThickness, height: "100%" }} />
+          <div
+            style={{
+              marginRight: 4,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
+              textAlign: "right",
+            }}
+          >
+            <span>{fmt(dMax)}</span>
+            <span>{fmt(dMin)}</span>
+          </div>
+        </div>
+      );
+    case "west":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            top: 24,
+            bottom: 24,
+            left: 24,
+            width: 50,
+            display: "flex",
+            alignItems: "stretch",
+          }}
+        >
+          <div style={{ ...barStyle, width: barThickness, height: "100%" }} />
+          <div
+            style={{
+              marginLeft: 4,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
+            }}
+          >
+            <span>{fmt(dMax)}</span>
+            <span>{fmt(dMin)}</span>
+          </div>
+        </div>
+      );
+    case "north":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            left: 24,
+            right: 24,
+            top: 24,
+            height: 32,
+            display: "flex",
+            flexDirection: "column-reverse",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 2,
+            }}
+          >
+            <span>{fmt(dMin)}</span>
+            <span>{fmt(dMax)}</span>
+          </div>
+          <div style={{ ...barStyle, height: barThickness, width: "100%" }} />
+        </div>
+      );
+    case "south":
+      return (
+        <div
+          style={{
+            ...containerStyle,
+            left: 24,
+            right: 24,
+            bottom: 24,
+            height: 32,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 2,
+            }}
+          >
+            <span>{fmt(dMin)}</span>
+            <span>{fmt(dMax)}</span>
+          </div>
+          <div style={{ ...barStyle, height: barThickness, width: "100%" }} />
+        </div>
+      );
+    default:
+      return null;
+  }
 }
 
 function addAxisLines(

@@ -14,8 +14,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VSCODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SRC="${VSCODE_ROOT}/../src/graphics"
+# numbl lives beside numbl-vscode (override with NUMBL_DIR).
+NUMBL_DIR="${NUMBL_DIR:-${VSCODE_ROOT}/../numbl}"
+SRC="${NUMBL_DIR}/src/graphics"
 DEST="${VSCODE_ROOT}/webview/graphics"
+
+if [ ! -d "$SRC" ]; then
+  echo "Error: numbl graphics source not found at $SRC" >&2
+  echo "Set NUMBL_DIR to the numbl repo root." >&2
+  exit 1
+fi
 
 changed=0
 for src_file in "$SRC"/*.ts "$SRC"/*.tsx; do

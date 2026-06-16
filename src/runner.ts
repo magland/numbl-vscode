@@ -36,23 +36,18 @@ export class NumblRunner {
     vscode.commands.executeCommand("setContext", "numbl.running", true);
 
     const config = vscode.workspace.getConfiguration("numbl");
-    const command = config.get<string>("command", "npx numbl");
+    const command = config.get<string>("command", "numbl");
     const extraPaths = config.get<string[]>("extraPaths", []);
-    const addScriptPath = config.get<boolean>("addScriptPath", true);
 
     const filePath = document.uri.fsPath;
     const cwd = path.dirname(filePath);
 
-    // Split the command prefix into executable + its args, then append run args
+    // Split the command prefix into executable + its args, then append run args.
+    // numbl automatically cd's into the script's directory and treats it as the
+    // first-priority search path, so no explicit script-path flag is needed.
     const parts = command.trim().split(/\s+/);
     const executable = parts[0];
-    const args = [
-      ...parts.slice(1),
-      "run",
-      filePath,
-      "--stream",
-      ...(addScriptPath ? ["--add-script-path"] : []),
-    ];
+    const args = [...parts.slice(1), "run", filePath, "--stream"];
     for (const p of extraPaths) {
       args.push("--path", p);
     }

@@ -2,7 +2,7 @@
   "name": "numbl",
   "displayName": "Numbl",
   "description": "Run .m scripts with numbl — output and figures inside VS Code",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "jmagland",
   "license": "Apache-2.0",
   "repository": {
@@ -68,11 +68,6 @@
           "type": "string",
           "default": "numbl",
           "description": "Command prefix for running numbl. Examples: 'numbl', 'npx numbl', 'npx tsx /path/to/src/cli.ts'"
-        },
-        "numbl.addScriptPath": {
-          "type": "boolean",
-          "default": true,
-          "description": "Add the script's directory to the numbl workspace (passes --add-script-path)"
         },
         "numbl.extraPaths": {
           "type": "array",

@@ -1,7 +1,15 @@
 import type {
   PlotTrace,
   ImagescTrace,
+  PcolorTrace,
   ContourTrace,
+  BarTrace,
+  ErrorBarTrace,
+  BoxTrace,
+  PieTrace,
+  HeatmapTrace,
+  QuiverTrace,
+  PatchTrace,
 } from "./types.js";
 import {
   traceColor,
@@ -11,6 +19,36 @@ import {
 } from "./plotHelpers.js";
 import { drawMarkers } from "./plotMarkers.js";
 import { drawLegend } from "./plotLegend.js";
+
+/** Generate tick values at powers of 10 for log-scale axes. */
+function generateLogTicks(min: number, max: number): number[] {
+  const safeMin = Math.max(min, Number.MIN_VALUE);
+  const safeMax = Math.max(max, Number.MIN_VALUE);
+  const logMin = Math.floor(Math.log10(safeMin));
+  const logMax = Math.ceil(Math.log10(safeMax));
+  const ticks: number[] = [];
+  for (let p = logMin; p <= logMax; p++) {
+    const v = Math.pow(10, p);
+    if (v >= safeMin && v <= safeMax) ticks.push(v);
+  }
+  // If too few ticks, add intermediate values (2, 5) × 10^p
+  if (ticks.length < 3) {
+    for (let p = logMin; p <= logMax; p++) {
+      for (const m of [2, 5]) {
+        const v = m * Math.pow(10, p);
+        if (v >= safeMin && v <= safeMax && !ticks.includes(v)) ticks.push(v);
+      }
+    }
+    ticks.sort((a, b) => a - b);
+  }
+  return ticks;
+}
+
+/** Format a log-scale tick value (e.g., 10^3 → "1000", 10^-2 → "0.01"). */
+function formatLogTick(v: number): string {
+  if (v >= 1 && v < 1e6 && Number.isInteger(v)) return v.toString();
+  return v.toExponential(0);
+}
 
 export function drawPlot(
   canvas: HTMLCanvasElement,
@@ -23,13 +61,46 @@ export function drawPlot(
   imagescTrace?: ImagescTrace,
   contourTraces?: ContourTrace[],
   colormap?: string,
-  axisMode?: string
+  axisMode?: string,
+  axisScale?: "linear" | "semilogx" | "semilogy" | "loglog",
+  barTraces?: BarTrace[],
+  barhTraces?: BarTrace[],
+  errorBarTraces?: ErrorBarTrace[],
+  boxTraces?: BoxTrace[],
+  pieTrace?: PieTrace,
+  heatmapTrace?: HeatmapTrace,
+  areaTraces?: PlotTrace[],
+  areaBaseValue?: number,
+  pcolorTraces?: PcolorTrace[],
+  shading?: "faceted" | "flat" | "interp",
+  colorbar?: boolean,
+  colorbarLocation?: string,
+  caxis?: [number, number],
+  colormapData?: number[][],
+  quiverTraces?: QuiverTrace[],
+  xlim?: [number | null, number | null],
+  ylim?: [number | null, number | null],
+  yDir?: "normal" | "reverse",
+  axisVisible?: boolean,
+  boxOn?: boolean,
+  patchTraces?: PatchTrace[]
 ) {
+  _activeColormapData = colormapData;
   const ctx = canvas.getContext("2d");
   const hasContent =
     traces.length > 0 ||
     imagescTrace !== undefined ||
-    (contourTraces && contourTraces.length > 0);
+    (pcolorTraces && pcolorTraces.length > 0) ||
+    (contourTraces && contourTraces.length > 0) ||
+    (barTraces && barTraces.length > 0) ||
+    (barhTraces && barhTraces.length > 0) ||
+    (errorBarTraces && errorBarTraces.length > 0) ||
+    (boxTraces && boxTraces.length > 0) ||
+    pieTrace !== undefined ||
+    heatmapTrace !== undefined ||
+    (areaTraces && areaTraces.length > 0) ||
+    (quiverTraces && quiverTraces.length > 0) ||
+    (patchTraces && patchTraces.length > 0);
   if (!ctx || !hasContent) return;
 
   const dpr = window.devicePixelRatio || 1;
@@ -44,6 +115,18 @@ export function drawPlot(
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, cw, ch);
 
+  // Pie / donut chart — completely separate rendering path (no axes)
+  if (pieTrace) {
+    drawPieChart(ctx, cw, ch, pieTrace, title);
+    return;
+  }
+
+  // Heatmap — completely separate rendering path (categorical axes)
+  if (heatmapTrace) {
+    drawHeatmap(ctx, cw, ch, heatmapTrace, title, colormap);
+    return;
+  }
+
   // Margins — expand to accommodate labels
   const margin = {
     top: title ? 40 : 20,
@@ -51,6 +134,14 @@ export function drawPlot(
     bottom: xlabel ? 56 : 40,
     left: ylabel ? 76 : 60,
   };
+  // Reserve space for an outside colorbar.
+  const cbLoc = (colorbarLocation ?? "eastoutside").toLowerCase();
+  if (colorbar) {
+    if (cbLoc === "eastoutside") margin.right += 70;
+    else if (cbLoc === "westoutside") margin.left += 70;
+    else if (cbLoc === "northoutside") margin.top += 50;
+    else if (cbLoc === "southoutside") margin.bottom += 50;
+  }
   const plotW = cw - margin.left - margin.right;
   const plotH = ch - margin.top - margin.bottom;
 
@@ -84,6 +175,24 @@ export function drawPlot(
     if (imagescTrace.y[1] > yMax) yMax = imagescTrace.y[1];
   }
 
+  // Include pcolor bounds
+  if (pcolorTraces) {
+    for (const pt of pcolorTraces) {
+      for (const v of pt.x) {
+        if (isFinite(v)) {
+          if (v < xMin) xMin = v;
+          if (v > xMax) xMax = v;
+        }
+      }
+      for (const v of pt.y) {
+        if (isFinite(v)) {
+          if (v < yMin) yMin = v;
+          if (v > yMax) yMax = v;
+        }
+      }
+    }
+  }
+
   // Include contour bounds
   if (contourTraces) {
     for (const ct of contourTraces) {
@@ -102,6 +211,157 @@ export function drawPlot(
     }
   }
 
+  // Include patch bounds (use the x/y of each vertex)
+  if (patchTraces) {
+    for (const pt of patchTraces) {
+      for (const v of pt.vertices) {
+        if (isFinite(v[0])) {
+          if (v[0] < xMin) xMin = v[0];
+          if (v[0] > xMax) xMax = v[0];
+        }
+        if (isFinite(v[1])) {
+          if (v[1] < yMin) yMin = v[1];
+          if (v[1] > yMax) yMax = v[1];
+        }
+      }
+    }
+  }
+
+  // Include bar bounds
+  if (barTraces) {
+    for (const bt of barTraces) {
+      const halfW = bt.width / 2;
+      for (let i = 0; i < bt.x.length; i++) {
+        const bx = bt.x[i];
+        if (isFinite(bx)) {
+          if (bx - halfW < xMin) xMin = bx - halfW;
+          if (bx + halfW > xMax) xMax = bx + halfW;
+        }
+        const by = bt.y[i];
+        if (isFinite(by)) {
+          if (by < yMin) yMin = by;
+          if (by > yMax) yMax = by;
+        }
+      }
+      // Bars extend to zero
+      if (0 < yMin) yMin = 0;
+      if (0 > yMax) yMax = 0;
+    }
+  }
+
+  // Include barh bounds (horizontal bars: x=positions on y-axis, y=bar lengths on x-axis)
+  if (barhTraces) {
+    for (const bt of barhTraces) {
+      const halfH = bt.width / 2;
+      for (let i = 0; i < bt.x.length; i++) {
+        const pos = bt.x[i]; // position on y-axis
+        if (isFinite(pos)) {
+          if (pos - halfH < yMin) yMin = pos - halfH;
+          if (pos + halfH > yMax) yMax = pos + halfH;
+        }
+        const len = bt.y[i]; // bar length on x-axis
+        if (isFinite(len)) {
+          if (len < xMin) xMin = len;
+          if (len > xMax) xMax = len;
+        }
+      }
+      // Horizontal bars extend to zero on the x-axis
+      if (0 < xMin) xMin = 0;
+      if (0 > xMax) xMax = 0;
+    }
+  }
+
+  // Include errorbar bounds
+  if (errorBarTraces) {
+    for (const et of errorBarTraces) {
+      for (let i = 0; i < et.x.length; i++) {
+        const ex = et.x[i];
+        const ey = et.y[i];
+        if (isFinite(ex)) {
+          const xl = et.xNeg ? ex - et.xNeg[i] : ex;
+          const xr = et.xPos ? ex + et.xPos[i] : ex;
+          if (xl < xMin) xMin = xl;
+          if (xr > xMax) xMax = xr;
+        }
+        if (isFinite(ey)) {
+          const ylo = ey - et.yNeg[i];
+          const yhi = ey + et.yPos[i];
+          if (ylo < yMin) yMin = ylo;
+          if (yhi > yMax) yMax = yhi;
+        }
+      }
+    }
+  }
+
+  // Include boxchart bounds
+  if (boxTraces) {
+    for (const bt of boxTraces) {
+      const halfW = bt.width / 2;
+      if (bt.x - halfW < xMin) xMin = bt.x - halfW;
+      if (bt.x + halfW > xMax) xMax = bt.x + halfW;
+      if (bt.whiskerLow < yMin) yMin = bt.whiskerLow;
+      if (bt.whiskerHigh > yMax) yMax = bt.whiskerHigh;
+      for (const o of bt.outliers) {
+        if (o < yMin) yMin = o;
+        if (o > yMax) yMax = o;
+      }
+    }
+  }
+
+  // Include area bounds (stacked: sum y values for upper bound)
+  if (areaTraces && areaTraces.length > 0) {
+    const base = areaBaseValue ?? 0;
+    if (base < yMin) yMin = base;
+    if (base > yMax) yMax = base;
+    // For stacked areas, the total height is the sum of all traces
+    const n = areaTraces[0].x.length;
+    for (let i = 0; i < n; i++) {
+      let cumY = base;
+      for (const t of areaTraces) {
+        if (i < t.x.length) {
+          const v = t.x[i];
+          if (isFinite(v)) {
+            if (v < xMin) xMin = v;
+            if (v > xMax) xMax = v;
+          }
+          cumY += t.y[i] - base;
+          if (isFinite(cumY)) {
+            if (cumY < yMin) yMin = cumY;
+            if (cumY > yMax) yMax = cumY;
+          }
+        }
+      }
+    }
+  }
+
+  // Include quiver bounds (tail + head positions)
+  if (quiverTraces) {
+    for (const qt of quiverTraces) {
+      for (let i = 0; i < qt.x.length; i++) {
+        const x0 = qt.x[i];
+        const y0 = qt.y[i];
+        const x1 = x0 + qt.u[i];
+        const y1 = y0 + qt.v[i];
+        if (isFinite(x0)) {
+          if (x0 < xMin) xMin = x0;
+          if (x0 > xMax) xMax = x0;
+        }
+        if (isFinite(x1)) {
+          if (x1 < xMin) xMin = x1;
+          if (x1 > xMax) xMax = x1;
+        }
+        if (isFinite(y0)) {
+          if (y0 < yMin) yMin = y0;
+          if (y0 > yMax) yMax = y0;
+        }
+        if (isFinite(y1)) {
+          if (y1 < yMin) yMin = y1;
+          if (y1 > yMax) yMax = y1;
+        }
+      }
+    }
+  }
+
   if (!isFinite(xMin)) return;
 
   // Add padding if range is zero
@@ -114,18 +374,65 @@ export function drawPlot(
     yMax += 1;
   }
 
-  // Parse axis mode flags
-  const isTight = axisMode?.includes("tight") ?? false;
-  const isEqual = axisMode?.includes("equal") ?? false;
+  // Parse axis mode flags. `image` is equal+tight; `square` makes the plot
+  // box square (without forcing equal data units); `padded` widens the
+  // default margin.
+  const isImage = axisMode?.includes("image") ?? false;
+  const isTight = (axisMode?.includes("tight") ?? false) || isImage;
+  const isEqual = (axisMode?.includes("equal") ?? false) || isImage;
+  const isSquare = axisMode?.includes("square") ?? false;
+  const isPadded = axisMode?.includes("padded") ?? false;
+  const showAxes = axisVisible !== false;
+  const yReversed = yDir === "reverse";
 
-  // Small margin around data (skip if tight)
+  const logX = axisScale === "semilogx" || axisScale === "loglog";
+  const logY = axisScale === "semilogy" || axisScale === "loglog";
+
+  // For log axes, clamp mins to positive values
+  if (logX && xMin <= 0) xMin = xMax > 0 ? xMax * 1e-6 : 1;
+  if (logY && yMin <= 0) yMin = yMax > 0 ? yMax * 1e-6 : 1;
+
+  // Small margin around data (skip if tight). `padded` uses a wider margin.
   if (!isTight) {
-    const xPad = (xMax - xMin) * 0.05;
-    const yPad = (yMax - yMin) * 0.05;
-    xMin -= xPad;
-    xMax += xPad;
-    yMin -= yPad;
-    yMax += yPad;
+    const frac = isPadded ? 0.07 : 0.05;
+    if (logX) {
+      // Pad in log space
+      const logPad = (Math.log10(xMax) - Math.log10(xMin)) * frac;
+      xMin = Math.pow(10, Math.log10(xMin) - logPad);
+      xMax = Math.pow(10, Math.log10(xMax) + logPad);
+    } else {
+      const xPad = (xMax - xMin) * frac;
+      xMin -= xPad;
+      xMax += xPad;
+    }
+    if (logY) {
+      const logPad = (Math.log10(yMax) - Math.log10(yMin)) * frac;
+      yMin = Math.pow(10, Math.log10(yMin) - logPad);
+      yMax = Math.pow(10, Math.log10(yMax) + logPad);
+    } else {
+      const yPad = (yMax - yMin) * frac;
+      yMin -= yPad;
+      yMax += yPad;
+    }
+  }
+
+  // Explicit limits from `axis([...])` / `xlim` / `ylim` override the
+  // computed bounds. A `null` bound keeps the automatic value.
+  if (xlim) {
+    if (xlim[0] != null) xMin = xlim[0];
+    if (xlim[1] != null) xMax = xlim[1];
+  }
+  if (ylim) {
+    if (ylim[0] != null) yMin = ylim[0];
+    if (ylim[1] != null) yMax = ylim[1];
+  }
+  if (xMax === xMin) {
+    xMin -= 1;
+    xMax += 1;
+  }
+  if (yMax === yMin) {
+    yMin -= 1;
+    yMax += 1;
   }
 
   // axis equal: ensure 1 data unit = same pixel length on both axes
@@ -164,28 +471,54 @@ export function drawPlot(
         xMax = xCenter + newXRange / 2;
       }
     }
+  } else if (isSquare) {
+    // axis square: make the plot box square (equal axis-line lengths),
+    // without forcing equal data units. Shrink the longer side and center.
+    const side = Math.min(plotW, plotH);
+    effMarginLeft = margin.left + (plotW - side) / 2;
+    effMarginTop = margin.top + (plotH - side) / 2;
+    effPlotW = side;
+    effPlotH = side;
   }
 
-  const toCanvasX = (v: number) =>
-    effMarginLeft + ((v - xMin) / (xMax - xMin)) * effPlotW;
-  const toCanvasY = (v: number) =>
-    effMarginTop + effPlotH - ((v - yMin) / (yMax - yMin)) * effPlotH;
+  const toCanvasX = logX
+    ? (v: number) => {
+        const logV = Math.log10(Math.max(v, Number.MIN_VALUE));
+        const logMin = Math.log10(Math.max(xMin, Number.MIN_VALUE));
+        const logMax = Math.log10(Math.max(xMax, Number.MIN_VALUE));
+        return effMarginLeft + ((logV - logMin) / (logMax - logMin)) * effPlotW;
+      }
+    : (v: number) => effMarginLeft + ((v - xMin) / (xMax - xMin)) * effPlotW;
+  // `axis ij` (yReversed) places the origin at the top-left: y increases
+  // downward instead of upward.
+  const toCanvasY = logY
+    ? (v: number) => {
+        const logV = Math.log10(Math.max(v, Number.MIN_VALUE));
+        const logMin = Math.log10(Math.max(yMin, Number.MIN_VALUE));
+        const logMax = Math.log10(Math.max(yMax, Number.MIN_VALUE));
+        const frac = (logV - logMin) / (logMax - logMin);
+        return yReversed
+          ? effMarginTop + frac * effPlotH
+          : effMarginTop + effPlotH - frac * effPlotH;
+      }
+    : (v: number) => {
+        const frac = (v - yMin) / (yMax - yMin);
+        return yReversed
+          ? effMarginTop + frac * effPlotH
+          : effMarginTop + effPlotH - frac * effPlotH;
+      };
 
   // Grid (only when gridOn is true or undefined — default on for backward compat)
-  if (gridOn !== false) {
+  if (gridOn !== false && showAxes) {
     ctx.strokeStyle = "#ddd";
     ctx.lineWidth = 0.5;
 
-    const xTicksGrid = generateTicks(
-      xMin,
-      xMax,
-      Math.max(3, Math.floor(effPlotW / 80))
-    );
-    const yTicksGrid = generateTicks(
-      yMin,
-      yMax,
-      Math.max(3, Math.floor(effPlotH / 50))
-    );
+    const xTicksGrid = logX
+      ? generateLogTicks(xMin, xMax)
+      : generateTicks(xMin, xMax, Math.max(3, Math.floor(effPlotW / 80)));
+    const yTicksGrid = logY
+      ? generateLogTicks(yMin, yMax)
+      : generateTicks(yMin, yMax, Math.max(3, Math.floor(effPlotH / 50)));
 
     for (const tx of xTicksGrid) {
       const cx = toCanvasX(tx);
@@ -203,37 +536,54 @@ export function drawPlot(
     }
   }
 
-  // Plot border
-  ctx.strokeStyle = "#333";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(effMarginLeft, effMarginTop, effPlotW, effPlotH);
+  // Plot border + tick labels. Hidden by `axis off` (Visible='off'), which
+  // suppresses the axes lines, ticks, and tick labels.
+  if (showAxes) {
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 1;
+    // `box on` (default) draws the full rectangle; `box off` draws only the
+    // left and bottom axis lines (MATLAB's L-shaped axes).
+    if (boxOn === false) {
+      ctx.beginPath();
+      ctx.moveTo(effMarginLeft, effMarginTop);
+      ctx.lineTo(effMarginLeft, effMarginTop + effPlotH);
+      ctx.lineTo(effMarginLeft + effPlotW, effMarginTop + effPlotH);
+      ctx.stroke();
+    } else {
+      ctx.strokeRect(effMarginLeft, effMarginTop, effPlotW, effPlotH);
+    }
 
-  // Tick labels
-  const xTicks = generateTicks(
-    xMin,
-    xMax,
-    Math.max(3, Math.floor(effPlotW / 80))
-  );
-  const yTicks = generateTicks(
-    yMin,
-    yMax,
-    Math.max(3, Math.floor(effPlotH / 50))
-  );
+    const xTicks = logX
+      ? generateLogTicks(xMin, xMax)
+      : generateTicks(xMin, xMax, Math.max(3, Math.floor(effPlotW / 80)));
+    const yTicks = logY
+      ? generateLogTicks(yMin, yMax)
+      : generateTicks(yMin, yMax, Math.max(3, Math.floor(effPlotH / 50)));
 
-  ctx.fillStyle = "#333";
-  ctx.font = "11px monospace";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  for (const tx of xTicks) {
-    ctx.fillText(formatTick(tx), toCanvasX(tx), effMarginTop + effPlotH + 5);
+    ctx.fillStyle = "#333";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const tx of xTicks) {
+      ctx.fillText(
+        logX ? formatLogTick(tx) : formatTick(tx),
+        toCanvasX(tx),
+        effMarginTop + effPlotH + 5
+      );
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const ty of yTicks) {
+      ctx.fillText(
+        logY ? formatLogTick(ty) : formatTick(ty),
+        effMarginLeft - 5,
+        toCanvasY(ty)
+      );
+    }
   }
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (const ty of yTicks) {
-    ctx.fillText(formatTick(ty), effMarginLeft - 5, toCanvasY(ty));
-  }
 
-  // Labels
+  // Labels. The title stays visible with `axis off` (it tracks the axes
+  // title, not the axis lines); the x/y axis labels are hidden.
   ctx.fillStyle = "#222";
   if (title) {
     ctx.font = "bold 13px sans-serif";
@@ -241,13 +591,13 @@ export function drawPlot(
     ctx.textBaseline = "middle";
     ctx.fillText(title, effMarginLeft + effPlotW / 2, effMarginTop / 2);
   }
-  if (xlabel) {
+  if (xlabel && showAxes) {
     ctx.font = "12px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     ctx.fillText(xlabel, effMarginLeft + effPlotW / 2, ch - 4);
   }
-  if (ylabel) {
+  if (ylabel && showAxes) {
     ctx.font = "12px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -269,11 +619,312 @@ export function drawPlot(
     drawImagesc(ctx, imagescTrace, toCanvasX, toCanvasY, colormap);
   }
 
+  // Pcolor rendering
+  if (pcolorTraces) {
+    for (const pt of pcolorTraces) {
+      drawPcolor(ctx, pt, toCanvasX, toCanvasY, colormap, shading, caxis);
+    }
+  }
+
   // Contour rendering
   if (contourTraces) {
     for (const ct of contourTraces) {
       drawContour(ctx, ct, toCanvasX, toCanvasY, colormap);
     }
+  }
+
+  // Patch rendering (filled polygons; drawn under line plots)
+  if (patchTraces) {
+    for (const pt of patchTraces) {
+      drawPatch(ctx, pt, toCanvasX, toCanvasY, colormap, caxis);
+    }
+  }
+
+  // Bar rendering
+  if (barTraces) {
+    const defaultColors: [number, number, number][] = [
+      [0.0, 0.447, 0.741],
+      [0.85, 0.325, 0.098],
+      [0.929, 0.694, 0.125],
+      [0.494, 0.184, 0.556],
+      [0.466, 0.674, 0.188],
+    ];
+    for (let bi = 0; bi < barTraces.length; bi++) {
+      const bt = barTraces[bi];
+      const [r, g, b] = bt.color ?? defaultColors[bi % defaultColors.length];
+      ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+      ctx.strokeStyle = `rgb(${Math.round(r * 180)},${Math.round(g * 180)},${Math.round(b * 180)})`;
+      ctx.lineWidth = 1;
+      const y0 = toCanvasY(0);
+      for (let i = 0; i < bt.x.length; i++) {
+        const cx = toCanvasX(bt.x[i]);
+        const cy = toCanvasY(bt.y[i]);
+        const halfW = (toCanvasX(bt.x[i] + bt.width) - toCanvasX(bt.x[i])) / 2;
+        ctx.fillRect(
+          cx - halfW,
+          Math.min(cy, y0),
+          halfW * 2,
+          Math.abs(cy - y0)
+        );
+        ctx.strokeRect(
+          cx - halfW,
+          Math.min(cy, y0),
+          halfW * 2,
+          Math.abs(cy - y0)
+        );
+      }
+    }
+  }
+
+  // Barh rendering (horizontal bars)
+  if (barhTraces) {
+    const defaultColors: [number, number, number][] = [
+      [0.0, 0.447, 0.741],
+      [0.85, 0.325, 0.098],
+      [0.929, 0.694, 0.125],
+      [0.494, 0.184, 0.556],
+      [0.466, 0.674, 0.188],
+    ];
+    for (let bi = 0; bi < barhTraces.length; bi++) {
+      const bt = barhTraces[bi];
+      const [r, g, b] = bt.color ?? defaultColors[bi % defaultColors.length];
+      ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+      ctx.strokeStyle = `rgb(${Math.round(r * 180)},${Math.round(g * 180)},${Math.round(b * 180)})`;
+      ctx.lineWidth = 1;
+      const x0 = toCanvasX(0);
+      for (let i = 0; i < bt.x.length; i++) {
+        const cy = toCanvasY(bt.x[i]); // position on y-axis
+        const cx = toCanvasX(bt.y[i]); // bar length on x-axis
+        const halfH = (toCanvasY(bt.x[i] - bt.width) - toCanvasY(bt.x[i])) / 2;
+        ctx.fillRect(
+          Math.min(x0, cx),
+          cy - halfH,
+          Math.abs(cx - x0),
+          halfH * 2
+        );
+        ctx.strokeRect(
+          Math.min(x0, cx),
+          cy - halfH,
+          Math.abs(cx - x0),
+          halfH * 2
+        );
+      }
+    }
+  }
+
+  // Box chart rendering
+  if (boxTraces) {
+    const defaultColors: [number, number, number][] = [
+      [0.0, 0.447, 0.741],
+      [0.85, 0.325, 0.098],
+      [0.929, 0.694, 0.125],
+      [0.494, 0.184, 0.556],
+      [0.466, 0.674, 0.188],
+    ];
+    for (let bi = 0; bi < boxTraces.length; bi++) {
+      const bt = boxTraces[bi];
+      const [r, g, b] = bt.color ?? defaultColors[bi % defaultColors.length];
+      const fillColor = `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},0.3)`;
+      const strokeColor = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+
+      const cx = toCanvasX(bt.x);
+      const halfW = Math.abs(toCanvasX(bt.x + bt.width) - toCanvasX(bt.x)) / 2;
+
+      const yQ1 = toCanvasY(bt.q1);
+      const yQ3 = toCanvasY(bt.q3);
+      const yMed = toCanvasY(bt.median);
+      const yWLo = toCanvasY(bt.whiskerLow);
+      const yWHi = toCanvasY(bt.whiskerHigh);
+
+      // Box (Q1 to Q3)
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(
+        cx - halfW,
+        Math.min(yQ1, yQ3),
+        halfW * 2,
+        Math.abs(yQ3 - yQ1)
+      );
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(
+        cx - halfW,
+        Math.min(yQ1, yQ3),
+        halfW * 2,
+        Math.abs(yQ3 - yQ1)
+      );
+
+      // Median line
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - halfW, yMed);
+      ctx.lineTo(cx + halfW, yMed);
+      ctx.stroke();
+
+      // Whiskers (vertical lines from box to whisker ends)
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 2]);
+      ctx.beginPath();
+      ctx.moveTo(cx, yQ3);
+      ctx.lineTo(cx, yWHi);
+      ctx.moveTo(cx, yQ1);
+      ctx.lineTo(cx, yWLo);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Whisker caps (horizontal lines at whisker ends)
+      const capW = halfW * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(cx - capW, yWHi);
+      ctx.lineTo(cx + capW, yWHi);
+      ctx.moveTo(cx - capW, yWLo);
+      ctx.lineTo(cx + capW, yWLo);
+      ctx.stroke();
+
+      // Outliers
+      ctx.fillStyle = strokeColor;
+      for (const o of bt.outliers) {
+        const oy = toCanvasY(o);
+        ctx.beginPath();
+        ctx.arc(cx, oy, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Area rendering (stacked filled areas)
+  if (areaTraces && areaTraces.length > 0) {
+    const base = areaBaseValue ?? 0;
+    const defaultColors: [number, number, number][] = [
+      [0.0, 0.447, 0.741],
+      [0.85, 0.325, 0.098],
+      [0.929, 0.694, 0.125],
+      [0.494, 0.184, 0.556],
+      [0.466, 0.674, 0.188],
+      [0.301, 0.745, 0.933],
+      [0.635, 0.078, 0.184],
+    ];
+    // Build cumulative stacks (bottom-up)
+    const n = areaTraces[0].x.length;
+    const bottoms: number[][] = [];
+    const tops: number[][] = [];
+    let prevTop = new Array(n).fill(base);
+    for (let ti = 0; ti < areaTraces.length; ti++) {
+      const t = areaTraces[ti];
+      bottoms.push([...prevTop]);
+      const top: number[] = [];
+      for (let i = 0; i < n; i++) {
+        top.push(prevTop[i] + (i < t.y.length ? t.y[i] - base : 0));
+      }
+      tops.push(top);
+      prevTop = top;
+    }
+    // Draw from last (top) to first (bottom) so earlier areas are on top visually
+    for (let ti = areaTraces.length - 1; ti >= 0; ti--) {
+      const t = areaTraces[ti];
+      const [r, g, b] = t.color ?? defaultColors[ti % defaultColors.length];
+      // Fill
+      ctx.fillStyle = `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},0.6)`;
+      ctx.beginPath();
+      // Top edge (left to right)
+      for (let i = 0; i < n; i++) {
+        const cx = toCanvasX(t.x[i]);
+        const cy = toCanvasY(tops[ti][i]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      }
+      // Bottom edge (right to left)
+      for (let i = n - 1; i >= 0; i--) {
+        ctx.lineTo(toCanvasX(t.x[i]), toCanvasY(bottoms[ti][i]));
+      }
+      ctx.closePath();
+      ctx.fill();
+      // Stroke top edge
+      ctx.strokeStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const cx = toCanvasX(t.x[i]);
+        const cy = toCanvasY(tops[ti][i]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // Errorbar rendering
+  if (errorBarTraces) {
+    for (let ei = 0; ei < errorBarTraces.length; ei++) {
+      const et = errorBarTraces[ei];
+      const colorStr = et.color
+        ? `rgb(${Math.round(et.color[0] * 255)},${Math.round(et.color[1] * 255)},${Math.round(et.color[2] * 255)})`
+        : traceColor({ x: [], y: [] }, ei);
+      ctx.strokeStyle = colorStr;
+      ctx.fillStyle = colorStr;
+      ctx.lineWidth = (et.lineWidth ?? 1) * dpr;
+      const capHalf = 3 * dpr;
+
+      // Draw the connecting line
+      ctx.beginPath();
+      for (let i = 0; i < et.x.length; i++) {
+        const cx = toCanvasX(et.x[i]);
+        const cy = toCanvasY(et.y[i]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+
+      // Draw error bars
+      for (let i = 0; i < et.x.length; i++) {
+        const cx = toCanvasX(et.x[i]);
+        const cy = toCanvasY(et.y[i]);
+
+        // Vertical error bars
+        const yLo = toCanvasY(et.y[i] - et.yNeg[i]);
+        const yHi = toCanvasY(et.y[i] + et.yPos[i]);
+        ctx.beginPath();
+        ctx.moveTo(cx, yLo);
+        ctx.lineTo(cx, yHi);
+        ctx.stroke();
+        // Caps
+        ctx.beginPath();
+        ctx.moveTo(cx - capHalf, yLo);
+        ctx.lineTo(cx + capHalf, yLo);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx - capHalf, yHi);
+        ctx.lineTo(cx + capHalf, yHi);
+        ctx.stroke();
+
+        // Horizontal error bars
+        if (et.xNeg && et.xPos) {
+          const xL = toCanvasX(et.x[i] - et.xNeg[i]);
+          const xR = toCanvasX(et.x[i] + et.xPos[i]);
+          ctx.beginPath();
+          ctx.moveTo(xL, cy);
+          ctx.lineTo(xR, cy);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(xL, cy - capHalf);
+          ctx.lineTo(xL, cy + capHalf);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(xR, cy - capHalf);
+          ctx.lineTo(xR, cy + capHalf);
+          ctx.stroke();
+        }
+
+        // Draw marker at data point
+        ctx.beginPath();
+        ctx.arc(cx, cy, 2 * dpr, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Quiver rendering
+  if (quiverTraces) {
+    drawQuiver(ctx, quiverTraces, toCanvasX, toCanvasY, dpr);
   }
 
   for (let ti = 0; ti < traces.length; ti++) {
@@ -322,15 +973,152 @@ export function drawPlot(
   if (legend && legend.length > 0) {
     drawLegend(ctx, traces, legend, effMarginLeft + effPlotW, effMarginTop);
   }
+
+  // Colorbar (drawn after clip is restored so it can sit outside the plot area)
+  if (colorbar) {
+    const cbRange =
+      caxis ??
+      computeColorbarRange(
+        pcolorTraces,
+        imagescTrace,
+        contourTraces,
+        patchTraces
+      );
+    if (cbRange) {
+      drawColorbarAtLocation(
+        ctx,
+        cbLoc,
+        effMarginLeft,
+        effMarginTop,
+        effPlotW,
+        effPlotH,
+        cbRange[0],
+        cbRange[1],
+        colormap
+      );
+    }
+  }
+}
+
+// ── Quiver rendering ────────────────────────────────────────────────────
+
+const QUIVER_DEFAULT_COLORS: [number, number, number][] = [
+  [0.0, 0.447, 0.741],
+  [0.85, 0.325, 0.098],
+  [0.929, 0.694, 0.125],
+  [0.494, 0.184, 0.556],
+  [0.466, 0.674, 0.188],
+];
+
+function rgbStr(c: [number, number, number]): string {
+  return `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+}
+
+function drawQuiver(
+  ctx: CanvasRenderingContext2D,
+  quiverTraces: QuiverTrace[],
+  toCanvasX: (v: number) => number,
+  toCanvasY: (v: number) => number,
+  dpr: number
+) {
+  for (let qi = 0; qi < quiverTraces.length; qi++) {
+    const qt = quiverTraces[qi];
+    const color =
+      qt.color ?? QUIVER_DEFAULT_COLORS[qi % QUIVER_DEFAULT_COLORS.length];
+    const colorStr = rgbStr(color);
+    const lineWidth = (qt.lineWidth ?? 0.5) * dpr * 2;
+
+    ctx.strokeStyle = colorStr;
+    ctx.fillStyle = colorStr;
+    ctx.lineWidth = lineWidth;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.setLineDash(getLineDash(qt.lineStyle));
+
+    const n = qt.x.length;
+    for (let i = 0; i < n; i++) {
+      const x0 = qt.x[i];
+      const y0 = qt.y[i];
+      const ux = qt.u[i];
+      const vy = qt.v[i];
+      if (!isFinite(x0) || !isFinite(y0) || !isFinite(ux) || !isFinite(vy))
+        continue;
+
+      const x1 = x0 + ux;
+      const y1 = y0 + vy;
+      const cx0 = toCanvasX(x0);
+      const cy0 = toCanvasY(y0);
+      const cx1 = toCanvasX(x1);
+      const cy1 = toCanvasY(y1);
+
+      // Shaft
+      ctx.beginPath();
+      ctx.moveTo(cx0, cy0);
+      ctx.lineTo(cx1, cy1);
+      ctx.stroke();
+
+      // Arrowhead — pixel-space, ~1/3 of the shaft length but capped
+      if (qt.showArrowHead) {
+        const dxp = cx1 - cx0;
+        const dyp = cy1 - cy0;
+        const lenp = Math.sqrt(dxp * dxp + dyp * dyp);
+        if (lenp > 1) {
+          const headLen = Math.min(lenp * 0.3, 12 * dpr);
+          const headAngle = Math.PI / 9; // 20°
+          const ang = Math.atan2(dyp, dxp);
+          const hx1 = cx1 - headLen * Math.cos(ang - headAngle);
+          const hy1 = cy1 - headLen * Math.sin(ang - headAngle);
+          const hx2 = cx1 - headLen * Math.cos(ang + headAngle);
+          const hy2 = cy1 - headLen * Math.sin(ang + headAngle);
+          ctx.beginPath();
+          ctx.moveTo(hx1, hy1);
+          ctx.lineTo(cx1, cy1);
+          ctx.lineTo(hx2, hy2);
+          ctx.stroke();
+        }
+      }
+
+      // Tail marker
+      if (qt.marker) {
+        const r = 3 * dpr;
+        ctx.beginPath();
+        ctx.arc(cx0, cy0, r, 0, Math.PI * 2);
+        if (qt.markerFilled) ctx.fill();
+        else ctx.stroke();
+      }
+    }
+
+    ctx.setLineDash([]);
+  }
 }
 
 // ── Colormap helpers ────────────────────────────────────────────────────
 
+/** Module-scoped custom colormap data, set at the start of drawPlot. */
+let _activeColormapData: number[][] | undefined;
+
 function colormapLookup(t: number, name?: string): [number, number, number] {
   // t is 0..1
   const clamped = Math.max(0, Math.min(1, t));
+  if (_activeColormapData && _activeColormapData.length > 0) {
+    const data = _activeColormapData;
+    const n = data.length;
+    if (n === 1) return data[0] as [number, number, number];
+    const idx = clamped * (n - 1);
+    const lo = Math.floor(idx);
+    const hi = Math.min(lo + 1, n - 1);
+    const frac = idx - lo;
+    return [
+      data[lo][0] + frac * (data[hi][0] - data[lo][0]),
+      data[lo][1] + frac * (data[hi][1] - data[lo][1]),
+      data[lo][2] + frac * (data[hi][2] - data[lo][2]),
+    ];
+  }
   if (name === "jet") {
     return jetColormap(clamped);
+  }
+  if (name === "redblue") {
+    return redblueColormap(clamped);
   }
   // Default: parula-like (blue → yellow)
   return parulaColormap(clamped);
@@ -374,6 +1162,16 @@ function jetColormap(t: number): [number, number, number] {
     Math.max(0, Math.min(1, g)),
     Math.max(0, Math.min(1, b)),
   ];
+}
+
+function redblueColormap(t: number): [number, number, number] {
+  // Blue (0) → White (0.5) → Red (1)
+  if (t < 0.5) {
+    const s = t * 2; // 0..1
+    return [s, s, 1];
+  }
+  const s = (t - 0.5) * 2; // 0..1
+  return [1, 1 - s, 1 - s];
 }
 
 // ── Imagesc rendering ────────────────────────────────────────────────────
@@ -445,10 +1243,18 @@ function drawContour(
   if (!isFinite(zMin)) return;
   const zRange = zMax - zMin || 1;
 
-  // Generate contour levels
-  const levels: number[] = [];
-  for (let i = 0; i <= nLevels; i++) {
-    levels.push(zMin + (i / nLevels) * zRange);
+  // Contour levels: use the explicit list when given, else evenly spaced
+  // across the data range. The line-contour loop below skips the first and
+  // last entries (open boundary contours), so pad an explicit list with
+  // sentinel endpoints to keep every requested level drawn.
+  let levels: number[];
+  if (trace.levels && trace.levels.length > 0) {
+    levels = [zMin - zRange, ...trace.levels, zMax + zRange];
+  } else {
+    levels = [];
+    for (let i = 0; i <= nLevels; i++) {
+      levels.push(zMin + (i / nLevels) * zRange);
+    }
   }
 
   // Helper to get z value at grid position (row i, col j)
@@ -487,7 +1293,7 @@ function drawContour(
       const t = (level - zMin) / zRange;
       const [r, g, b] = colormapLookup(t, colormap);
       ctx.strokeStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = trace.lineWidth ?? 1;
 
       for (let j = 0; j < cols - 1; j++) {
         for (let i = 0; i < rows - 1; i++) {
@@ -608,4 +1414,817 @@ function marchingSquaresCell(
       break;
   }
   return segs;
+}
+
+// ── Pie / Donut chart rendering ─────────────────────────────────────────
+
+const PIE_COLORS: [number, number, number][] = [
+  [0.0, 0.447, 0.741],
+  [0.85, 0.325, 0.098],
+  [0.929, 0.694, 0.125],
+  [0.494, 0.184, 0.556],
+  [0.466, 0.674, 0.188],
+  [0.301, 0.745, 0.933],
+  [0.635, 0.078, 0.184],
+];
+
+function drawPieChart(
+  ctx: CanvasRenderingContext2D,
+  cw: number,
+  ch: number,
+  pie: PieTrace,
+  title?: string
+) {
+  const total = pie.values.reduce((a, b) => a + b, 0);
+  if (total <= 0) return;
+
+  const titleH = title ? 36 : 0;
+  const labelMargin = 60;
+  const cx = cw / 2;
+  const cy = titleH + (ch - titleH) / 2;
+  const outerR = Math.min(
+    cw / 2 - labelMargin,
+    (ch - titleH) / 2 - labelMargin
+  );
+  if (outerR <= 0) return;
+  const innerR = outerR * pie.innerRadius;
+
+  // Title
+  if (title) {
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillStyle = "#000";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(title, cx, 10);
+  }
+
+  let startAngle = -Math.PI / 2; // start at top
+
+  for (let i = 0; i < pie.values.length; i++) {
+    const sliceAngle = (pie.values[i] / total) * 2 * Math.PI;
+    const endAngle = startAngle + sliceAngle;
+
+    const [r, g, b] = pie.colors?.[i] ?? PIE_COLORS[i % PIE_COLORS.length];
+
+    // Draw slice
+    ctx.beginPath();
+    if (innerR > 0) {
+      ctx.arc(cx, cy, outerR, startAngle, endAngle);
+      ctx.arc(cx, cy, innerR, endAngle, startAngle, true);
+    } else {
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, outerR, startAngle, endAngle);
+      ctx.closePath();
+    }
+    ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    ctx.fill();
+
+    // Slice border
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Label
+    const midAngle = startAngle + sliceAngle / 2;
+    const pct = ((pie.values[i] / total) * 100).toFixed(1) + "%";
+    const labelR = outerR + 16;
+    const lx = cx + labelR * Math.cos(midAngle);
+    const ly = cy + labelR * Math.sin(midAngle);
+
+    ctx.font = "12px sans-serif";
+    ctx.fillStyle = "#333";
+    ctx.textAlign =
+      midAngle > Math.PI / 2 || midAngle < -Math.PI / 2 ? "right" : "left";
+    ctx.textBaseline = "middle";
+
+    const label = pie.names?.[i] ? `${pie.names[i]} (${pct})` : pct;
+    ctx.fillText(label, lx, ly);
+
+    startAngle = endAngle;
+  }
+}
+
+// ── Heatmap rendering ───────────────────────────────────────────────────
+
+function drawHeatmap(
+  ctx: CanvasRenderingContext2D,
+  cw: number,
+  ch: number,
+  hm: HeatmapTrace,
+  title?: string,
+  colormap?: string
+) {
+  const { data, rows, cols } = hm;
+  if (rows === 0 || cols === 0) return;
+
+  // Compute data range for coloring
+  let dMin = Infinity;
+  let dMax = -Infinity;
+  for (const v of data) {
+    if (isFinite(v)) {
+      if (v < dMin) dMin = v;
+      if (v > dMax) dMax = v;
+    }
+  }
+  if (!isFinite(dMin)) return;
+  const dRange = dMax - dMin || 1;
+
+  // Measure label widths to compute margins
+  ctx.font = "12px sans-serif";
+  const yLabels =
+    hm.yLabels ?? Array.from({ length: rows }, (_, i) => String(i + 1));
+  const xLabels =
+    hm.xLabels ?? Array.from({ length: cols }, (_, i) => String(i + 1));
+
+  let maxYLabelW = 0;
+  for (const lbl of yLabels) {
+    const w = ctx.measureText(lbl).width;
+    if (w > maxYLabelW) maxYLabelW = w;
+  }
+
+  const titleH = title ? 30 : 10;
+  const xLabelH = 24;
+  const yLabelW = maxYLabelW + 12;
+  const colorbarW = 50;
+
+  const plotL = yLabelW;
+  const plotT = titleH;
+  const plotW = cw - plotL - colorbarW;
+  const plotH = ch - plotT - xLabelH;
+  if (plotW <= 0 || plotH <= 0) return;
+
+  const cellW = plotW / cols;
+  const cellH = plotH / rows;
+
+  // Title
+  if (title) {
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillStyle = "#000";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(title, cw / 2, 8);
+  }
+
+  // Draw cells (column-major: data[j * rows + i] is row i, col j)
+  const fontSize = Math.max(8, Math.min(14, Math.min(cellW, cellH) * 0.35));
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (let j = 0; j < cols; j++) {
+    for (let i = 0; i < rows; i++) {
+      const v = data[j * rows + i];
+      const cx = plotL + j * cellW;
+      const cy = plotT + i * cellH;
+
+      // Cell color
+      const t = isFinite(v) ? (v - dMin) / dRange : 0;
+      const [r, g, b] = colormapLookup(t, colormap);
+      ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+      ctx.fillRect(cx, cy, cellW, cellH);
+
+      // Cell border
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx, cy, cellW, cellH);
+
+      // Cell value text
+      if (isFinite(v) && cellW > 16 && cellH > 12) {
+        const lum = r * 0.299 + g * 0.587 + b * 0.114;
+        ctx.fillStyle = lum > 0.5 ? "#000" : "#fff";
+        const txt = Number.isInteger(v) ? String(v) : v.toFixed(2);
+        ctx.fillText(txt, cx + cellW / 2, cy + cellH / 2);
+      }
+    }
+  }
+
+  // X-axis labels
+  ctx.font = "11px sans-serif";
+  ctx.fillStyle = "#333";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (let j = 0; j < cols; j++) {
+    ctx.fillText(
+      xLabels[j] ?? "",
+      plotL + j * cellW + cellW / 2,
+      plotT + plotH + 4
+    );
+  }
+
+  // Y-axis labels
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < rows; i++) {
+    ctx.fillText(yLabels[i] ?? "", plotL - 6, plotT + i * cellH + cellH / 2);
+  }
+
+  // Color bar
+  const cbL = plotL + plotW + 10;
+  const cbW = 16;
+  const cbT = plotT;
+  const cbH = plotH;
+  const nSteps = Math.max(1, Math.round(cbH));
+  for (let s = 0; s < nSteps; s++) {
+    const t = 1 - s / nSteps; // top = max, bottom = min
+    const [r, g, b] = colormapLookup(t, colormap);
+    ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    ctx.fillRect(cbL, cbT + (s / nSteps) * cbH, cbW, cbH / nSteps + 1);
+  }
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(cbL, cbT, cbW, cbH);
+
+  // Color bar labels
+  ctx.font = "10px sans-serif";
+  ctx.fillStyle = "#333";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(formatCbVal(dMax), cbL + cbW + 4, cbT);
+  ctx.textBaseline = "bottom";
+  ctx.fillText(formatCbVal(dMin), cbL + cbW + 4, cbT + cbH);
+}
+
+function formatCbVal(v: number): string {
+  if (Number.isInteger(v)) return String(v);
+  return v.toPrecision(3);
+}
+
+// ── Pcolor rendering ─────────────────────────────────────────────────────
+
+/**
+ * Draw a single pcolor trace. Each cell (i,j) for i in [0,rows-1) and
+ * j in [0,cols-1) is rendered as a quadrilateral with corners
+ *   (x[i,j],     y[i,j]),
+ *   (x[i,j+1],   y[i,j+1]),
+ *   (x[i+1,j+1], y[i+1,j+1]),
+ *   (x[i+1,j],   y[i+1,j]).
+ *
+ * MATLAB convention: the cell color comes from the (i,j) corner of C,
+ * so the last row and last column of C are not displayed.
+ *
+ * Shading dispatch:
+ *   - faceted (default): flat fill + edge stroke
+ *   - flat:              flat fill, no edge
+ *   - interp:            placeholder, currently calls flat (TODO)
+ */
+/** Render a patch trace: filled polygons with edges and optional markers.
+ *  Supports single-color / 'flat' / 'interp' / 'none' for both face and edge,
+ *  scalar (colormap-mapped) or RGB color data, faceAlpha, and line styling.
+ *  A polygon containing a non-finite vertex is drawn as an open polyline
+ *  (matching MATLAB's "NaN makes patch draw a line"). */
+function drawPatch(
+  ctx: CanvasRenderingContext2D,
+  trace: PatchTrace,
+  toCanvasX: (v: number) => number,
+  toCanvasY: (v: number) => number,
+  colormap: string | undefined,
+  caxis?: [number, number]
+) {
+  const { vertices, faces } = trace;
+  if (!faces || faces.length === 0 || vertices.length === 0) return;
+  const cdata = trace.faceVertexCData;
+
+  // Color range for scalar color data.
+  let cMin = Infinity;
+  let cMax = -Infinity;
+  if (caxis) {
+    [cMin, cMax] = caxis;
+  } else if (cdata) {
+    for (const cv of cdata) {
+      if (typeof cv === "number" && isFinite(cv)) {
+        if (cv < cMin) cMin = cv;
+        if (cv > cMax) cMax = cv;
+      }
+    }
+  }
+  const cRange = isFinite(cMin) && cMax > cMin ? cMax - cMin : 1;
+  const mapColor = (
+    entry: number | [number, number, number] | undefined
+  ): [number, number, number] => {
+    if (Array.isArray(entry)) return entry;
+    if (typeof entry !== "number") return [0, 0, 0];
+    const t = isFinite(cMin) ? (entry - cMin) / cRange : 0.5;
+    return colormapLookup(t, colormap);
+  };
+  const cdataAt = (idx: number) =>
+    cdata
+      ? mapColor(cdata[Math.min(Math.max(idx, 0), cdata.length - 1)])
+      : undefined;
+  const css = (c: [number, number, number]) =>
+    `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+
+  const faceColor = trace.faceColor ?? "none";
+  const edgeColor = trace.edgeColor ?? [0, 0, 0];
+  const alpha = trace.faceAlpha ?? 1;
+  const lineWidth = trace.lineWidth ?? 0.5;
+  const lineStyle = trace.lineStyle ?? "-";
+
+  ctx.save();
+  for (let f = 0; f < faces.length; f++) {
+    const face = faces[f];
+    if (face.length === 0) continue;
+    const pts = face.map(vi => vertices[vi]).filter(Boolean);
+    const isClosed = pts.every(p => isFinite(p[0]) && isFinite(p[1]));
+
+    // Resolve this face's fill color.
+    let fill: [number, number, number] | null = null;
+    if (faceColor === "none") fill = null;
+    else if (Array.isArray(faceColor)) fill = faceColor;
+    else if (faceColor === "flat") {
+      const idx = cdata && cdata.length === faces.length ? f : face[0];
+      fill = cdataAt(idx) ?? [0, 0, 0];
+    } else if (faceColor === "interp") {
+      let r = 0,
+        g = 0,
+        b = 0,
+        n = 0;
+      for (const vi of face) {
+        const col = cdataAt(vi);
+        if (col) {
+          r += col[0];
+          g += col[1];
+          b += col[2];
+          n++;
+        }
+      }
+      fill = n ? [r / n, g / n, b / n] : [0, 0, 0];
+    }
+
+    // Fill (closed polygons only).
+    if (fill && isClosed) {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = css(fill);
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const cx = toCanvasX(p[0]);
+        const cy = toCanvasY(p[1]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Edges.
+    if (edgeColor !== "none" && lineStyle !== "none") {
+      ctx.lineWidth = lineWidth;
+      ctx.setLineDash(getLineDash(lineStyle));
+      if (Array.isArray(edgeColor)) {
+        ctx.strokeStyle = css(edgeColor);
+        ctx.beginPath();
+        let pen = false;
+        for (const vi of face) {
+          const p = vertices[vi];
+          if (!p || !isFinite(p[0]) || !isFinite(p[1])) {
+            pen = false;
+            continue;
+          }
+          const cx = toCanvasX(p[0]);
+          const cy = toCanvasY(p[1]);
+          if (!pen) {
+            ctx.moveTo(cx, cy);
+            pen = true;
+          } else ctx.lineTo(cx, cy);
+        }
+        if (isClosed) ctx.closePath();
+        ctx.stroke();
+      } else {
+        // 'flat' / 'interp': color each edge segment from per-vertex data.
+        const nSeg = isClosed ? face.length : face.length - 1;
+        for (let i = 0; i < nSeg; i++) {
+          const a = vertices[face[i]];
+          const b = vertices[face[(i + 1) % face.length]];
+          if (!a || !b) continue;
+          if (!isFinite(a[0]) || !isFinite(a[1])) continue;
+          if (!isFinite(b[0]) || !isFinite(b[1])) continue;
+          const ca = cdataAt(face[i]) ?? [0, 0, 0];
+          const ax = toCanvasX(a[0]);
+          const ay = toCanvasY(a[1]);
+          const bx = toCanvasX(b[0]);
+          const by = toCanvasY(b[1]);
+          if (edgeColor === "interp") {
+            const cb = cdataAt(face[(i + 1) % face.length]) ?? ca;
+            const grad = ctx.createLinearGradient(ax, ay, bx, by);
+            grad.addColorStop(0, css(ca));
+            grad.addColorStop(1, css(cb));
+            ctx.strokeStyle = grad;
+          } else {
+            ctx.strokeStyle = css(ca);
+          }
+          ctx.beginPath();
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(bx, by);
+          ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+    }
+
+    // Markers at each finite vertex.
+    if (trace.marker && trace.marker !== "none") {
+      const mfc =
+        trace.markerFaceColor === "flat"
+          ? (fill ?? undefined)
+          : Array.isArray(trace.markerFaceColor)
+            ? trace.markerFaceColor
+            : undefined;
+      const markerTrace: PlotTrace = {
+        x: pts.map(p => p[0]),
+        y: pts.map(p => p[1]),
+        marker: trace.marker,
+        ...(mfc ? { markerFaceColor: mfc } : {}),
+      };
+      const dflt = Array.isArray(edgeColor) ? css(edgeColor) : "rgb(0,0,0)";
+      drawMarkers(ctx, markerTrace, toCanvasX, toCanvasY, dflt);
+    }
+  }
+  ctx.restore();
+}
+
+function drawPcolor(
+  ctx: CanvasRenderingContext2D,
+  trace: PcolorTrace,
+  toCanvasX: (v: number) => number,
+  toCanvasY: (v: number) => number,
+  colormap: string | undefined,
+  shading: "faceted" | "flat" | "interp" | undefined,
+  caxis?: [number, number]
+) {
+  const mode = shading ?? "faceted";
+  if (mode === "interp") {
+    // TODO: implement bilinear interpolation across cell corners.
+    drawPcolorFlat(ctx, trace, toCanvasX, toCanvasY, colormap, false, caxis);
+    return;
+  }
+  drawPcolorFlat(
+    ctx,
+    trace,
+    toCanvasX,
+    toCanvasY,
+    colormap,
+    mode === "faceted",
+    caxis
+  );
+}
+
+function drawPcolorFlat(
+  ctx: CanvasRenderingContext2D,
+  trace: PcolorTrace,
+  toCanvasX: (v: number) => number,
+  toCanvasY: (v: number) => number,
+  colormap: string | undefined,
+  drawEdges: boolean,
+  caxis?: [number, number]
+) {
+  const { rows, cols, x, y, c } = trace;
+  if (rows < 2 || cols < 2) return;
+
+  // Compute color range (use caxis if provided)
+  let cMin: number, cMax: number;
+  if (caxis) {
+    [cMin, cMax] = caxis;
+  } else {
+    cMin = Infinity;
+    cMax = -Infinity;
+    for (const v of c) {
+      if (isFinite(v)) {
+        if (v < cMin) cMin = v;
+        if (v > cMax) cMax = v;
+      }
+    }
+  }
+  if (!isFinite(cMin)) return;
+  const cRange = cMax - cMin || 1;
+
+  const alpha = trace.faceAlpha ?? 1;
+  ctx.save();
+  if (alpha < 1) ctx.globalAlpha = alpha;
+
+  // Each cell (i,j) for i in [0..rows-2], j in [0..cols-2]
+  for (let j = 0; j < cols - 1; j++) {
+    for (let i = 0; i < rows - 1; i++) {
+      const idx00 = j * rows + i;
+      const idx10 = j * rows + (i + 1);
+      const idx01 = (j + 1) * rows + i;
+      const idx11 = (j + 1) * rows + (i + 1);
+
+      const cv = c[idx00];
+      if (!isFinite(cv)) continue;
+
+      const t = (cv - cMin) / cRange;
+      const [r, g, b] = colormapLookup(t, colormap);
+      const fill = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+
+      const x0 = toCanvasX(x[idx00]);
+      const y0 = toCanvasY(y[idx00]);
+      const x1 = toCanvasX(x[idx10]);
+      const y1 = toCanvasY(y[idx10]);
+      const x2 = toCanvasX(x[idx11]);
+      const y2 = toCanvasY(y[idx11]);
+      const x3 = toCanvasX(x[idx01]);
+      const y3 = toCanvasY(y[idx01]);
+
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x3, y3);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+
+      if (drawEdges && trace.edgeColor !== "none") {
+        if (Array.isArray(trace.edgeColor)) {
+          const [er, eg, eb] = trace.edgeColor;
+          ctx.strokeStyle = `rgb(${Math.round(er * 255)},${Math.round(eg * 255)},${Math.round(eb * 255)})`;
+        } else {
+          ctx.strokeStyle = "rgba(0,0,0,0.3)";
+        }
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+      } else if (trace.edgeColor === "none") {
+        // Stroke with fill color to cover anti-aliasing seams between cells
+        ctx.strokeStyle = fill;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+// ── Colorbar rendering ──────────────────────────────────────────────────
+
+/**
+ * Determine the data range for the colorbar by inspecting whichever
+ * color-mapped trace is present in the 2D pipeline.
+ */
+function computeColorbarRange(
+  pcolorTraces: PcolorTrace[] | undefined,
+  imagescTrace: ImagescTrace | undefined,
+  contourTraces: ContourTrace[] | undefined,
+  patchTraces?: PatchTrace[]
+): [number, number] | null {
+  let dMin = Infinity;
+  let dMax = -Infinity;
+
+  const consume = (arr: number[] | Float64Array) => {
+    for (const v of arr) {
+      if (isFinite(v)) {
+        if (v < dMin) dMin = v;
+        if (v > dMax) dMax = v;
+      }
+    }
+  };
+
+  if (pcolorTraces) {
+    for (const pt of pcolorTraces) consume(pt.c);
+  }
+  if (imagescTrace) {
+    consume(imagescTrace.z);
+  }
+  if (contourTraces) {
+    for (const ct of contourTraces) consume(ct.z);
+  }
+  if (patchTraces) {
+    for (const pt of patchTraces) {
+      if (pt.faceVertexCData) {
+        for (const cv of pt.faceVertexCData) {
+          if (typeof cv === "number") consume([cv]);
+        }
+      }
+    }
+  }
+
+  if (!isFinite(dMin) || !isFinite(dMax)) return null;
+  if (dMin === dMax) {
+    dMin -= 0.5;
+    dMax += 0.5;
+  }
+  return [dMin, dMax];
+}
+
+/**
+ * Draw a colorbar at one of the 8 MATLAB locations relative to the plot
+ * area at (plotL, plotT, plotW, plotH).
+ */
+function drawColorbarAtLocation(
+  ctx: CanvasRenderingContext2D,
+  location: string,
+  plotL: number,
+  plotT: number,
+  plotW: number,
+  plotH: number,
+  dMin: number,
+  dMax: number,
+  colormap: string | undefined
+) {
+  const barThickness = 16;
+  const inset = 8; // gap between plot edge and colorbar for inside variants
+  const gap = 10; // gap between plot edge and colorbar for outside variants
+
+  switch (location) {
+    case "eastoutside": {
+      const x = plotL + plotW + gap;
+      drawColorbarVertical(
+        ctx,
+        x,
+        plotT,
+        barThickness,
+        plotH,
+        dMin,
+        dMax,
+        colormap,
+        "right"
+      );
+      break;
+    }
+    case "westoutside": {
+      const x = plotL - gap - barThickness;
+      drawColorbarVertical(
+        ctx,
+        x,
+        plotT,
+        barThickness,
+        plotH,
+        dMin,
+        dMax,
+        colormap,
+        "left"
+      );
+      break;
+    }
+    case "northoutside": {
+      const y = plotT - gap - barThickness;
+      drawColorbarHorizontal(
+        ctx,
+        plotL,
+        y,
+        plotW,
+        barThickness,
+        dMin,
+        dMax,
+        colormap,
+        "top"
+      );
+      break;
+    }
+    case "southoutside": {
+      const y = plotT + plotH + gap;
+      drawColorbarHorizontal(
+        ctx,
+        plotL,
+        y,
+        plotW,
+        barThickness,
+        dMin,
+        dMax,
+        colormap,
+        "bottom"
+      );
+      break;
+    }
+    case "east": {
+      const x = plotL + plotW - inset - barThickness;
+      drawColorbarVertical(
+        ctx,
+        x,
+        plotT + inset,
+        barThickness,
+        plotH - 2 * inset,
+        dMin,
+        dMax,
+        colormap,
+        "left"
+      );
+      break;
+    }
+    case "west": {
+      const x = plotL + inset;
+      drawColorbarVertical(
+        ctx,
+        x,
+        plotT + inset,
+        barThickness,
+        plotH - 2 * inset,
+        dMin,
+        dMax,
+        colormap,
+        "right"
+      );
+      break;
+    }
+    case "north": {
+      const y = plotT + inset;
+      drawColorbarHorizontal(
+        ctx,
+        plotL + inset,
+        y,
+        plotW - 2 * inset,
+        barThickness,
+        dMin,
+        dMax,
+        colormap,
+        "bottom"
+      );
+      break;
+    }
+    case "south": {
+      const y = plotT + plotH - inset - barThickness;
+      drawColorbarHorizontal(
+        ctx,
+        plotL + inset,
+        y,
+        plotW - 2 * inset,
+        barThickness,
+        dMin,
+        dMax,
+        colormap,
+        "top"
+      );
+      break;
+    }
+  }
+}
+
+function drawColorbarVertical(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  dMin: number,
+  dMax: number,
+  colormap: string | undefined,
+  labelSide: "left" | "right"
+) {
+  const nSteps = Math.max(1, Math.round(h));
+  for (let s = 0; s < nSteps; s++) {
+    const t = 1 - s / nSteps; // top = max, bottom = min
+    const [r, g, b] = colormapLookup(t, colormap);
+    ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    ctx.fillRect(x, y + (s / nSteps) * h, w, h / nSteps + 1);
+  }
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+
+  // Labels
+  ctx.font = "10px sans-serif";
+  ctx.fillStyle = "#333";
+  if (labelSide === "right") {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(formatCbVal(dMax), x + w + 4, y);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatCbVal(dMin), x + w + 4, y + h);
+  } else {
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(formatCbVal(dMax), x - 4, y);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatCbVal(dMin), x - 4, y + h);
+  }
+}
+
+function drawColorbarHorizontal(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  dMin: number,
+  dMax: number,
+  colormap: string | undefined,
+  labelSide: "top" | "bottom"
+) {
+  const nSteps = Math.max(1, Math.round(w));
+  for (let s = 0; s < nSteps; s++) {
+    const t = s / nSteps; // left = min, right = max
+    const [r, g, b] = colormapLookup(t, colormap);
+    ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+    ctx.fillRect(x + (s / nSteps) * w, y, w / nSteps + 1, h);
+  }
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+
+  // Labels
+  ctx.font = "10px sans-serif";
+  ctx.fillStyle = "#333";
+  if (labelSide === "bottom") {
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(formatCbVal(dMin), x, y + h + 4);
+    ctx.textAlign = "right";
+    ctx.fillText(formatCbVal(dMax), x + w, y + h + 4);
+  } else {
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.fillText(formatCbVal(dMin), x, y - 4);
+    ctx.textAlign = "right";
+    ctx.fillText(formatCbVal(dMax), x + w, y - 4);
+  }
 }
